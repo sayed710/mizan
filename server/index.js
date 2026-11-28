@@ -871,10 +871,10 @@ async function api(req, res, path) {
           ? await sendCustomerStatement(SMTP, snapshot, body)
           : path.endsWith('followup')
           ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId, ...(body.joinInvoices !== undefined ? { joinInvoices: Boolean(body.joinInvoices) } : {}), ...(body.pendingLetter !== undefined ? { pendingLetter: Boolean(body.pendingLetter) } : {}) }, undefined, writeOptions(user, allowed))
-          : await sendDocument(SMTP, snapshot, user, body, { blobs });
+          : await sendDocument(SMTP, snapshot, user, body, { blobs, writeOptions: writeOptions(user, allowed), readable: readableFor(user) });
       delivered = Boolean(out.db);
-      if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded', delivered: true });
       if (!out.db) return send(res, out.status, out.body);
+      if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded', delivered: true });
       const stored = recordSent(db, snapshot, out.db, writeOptions(user, allowed), { document: body, reconcile: out.reconcile });
       commitDb(stored.db, { actor: user.login });
       return send(res, out.status, stored.notice ? { ...out.body, message: stored.notice } : out.body);

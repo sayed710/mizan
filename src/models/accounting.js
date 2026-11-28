@@ -2160,6 +2160,7 @@ const invoiceLineField = {
     tax_ids: { ...invoiceLineTaxIds, domain: invoiceLineTaxDomain, rateOnlyText: (line) => (!line.tax_id && Number.isFinite(Number(line.tax)) && Number(line.tax) !== 0 ? `${Number(line.tax)}%` : null) },
     tax: { ...invoiceLineTaxPct, hidden: true },
     ...invoiceLineExtraBase,
+    invoice_legal_notes: { type: 'text', label: 'Legal Notes', hidden: true },
     display_type: { type: 'selection', label: 'Display Type', hidden: true, options: [['line_section', 'Section'], ['line_note', 'Note']] },
     sale_line_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },
     combo_parent_key: { type: 'char', label: 'Order Line', readonly: true, hidden: true },

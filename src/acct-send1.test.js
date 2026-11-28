@@ -1,6 +1,7 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,8 +20,11 @@ import {
   defaultInvoiceMailTemplate,
 } from './models/accounting.js';
 import { today } from './models/common.js';
+import { runScheduledJobs } from './models/scheduler.js';
 import { taxSnapshot } from './models/taxes.js';
-import { sendDocument } from '../server/mail.js';
+import { openBlobs } from '../server/blobs.js';
+import { openStorage } from '../server/storage.js';
+import { MAX_SEND_ATTACHMENTS_BYTES, sendDocument } from '../server/mail.js';
 import { generateInvoicePdf, UNSUPPORTED_UNICODE_PDF_ERROR } from '../server/invoicePdf.js';
 import { startServer } from '../server/test-server.js';
 
@@ -36,7 +40,7 @@ const allFind = (node, pred, acc = []) => {
   return acc;
 };
 
-function fakeSmtp({ failData = false } = {}) {
+function fakeSmtp({ failData = false, onData = null } = {}) {
   const seen = [];
   const server = net.createServer((s) => {
     s.on('error', () => {});
@@ -51,7 +55,10 @@ function fakeSmtp({ failData = false } = {}) {
         if (inData) {
           if (line === '.') {
             inData = false;
-            s.write(failData ? '550 Rejected\r\n' : '250 queued\r\n');
+            Promise.resolve(onData?.(seen)).then(
+              () => s.write(failData ? '550 Rejected\r\n' : '250 queued\r\n'),
+              () => s.write('451 Local error\r\n'),
+            );
           } else {
             seen.push(line);
           }
@@ -69,6 +76,18 @@ function fakeSmtp({ failData = false } = {}) {
     seen,
     cfg: { host: '127.0.0.1', port: server.address().port, from: 'erp@mizan.example' },
   })));
+}
+
+async function initSettledDbFile(dbPath, transform = (d) => d) {
+  const settled = await runScheduledJobs(seed());
+  const next = transform(settled);
+  const sql = new DatabaseSync(dbPath);
+  try {
+    openStorage(sql).save(null, next);
+  } finally {
+    sql.close();
+  }
+  return next;
 }
 
 function extractSmtpAttachments(lines) {
@@ -791,8 +810,49 @@ test('SEND1-9: sendDocument enforces 3 MB attachment cap, rejects invalid attach
     assert.equal(seen.length, 0);
     assert.equal(read(res.db, 'account.move', move.id).is_move_sent, false);
 
-    // Exactly 3 MB total decoded attachments is accepted and produces genuine PDF.
+    // Generated invoice PDF counts toward the 3 MB aggregate cap: 3 MB extra + PDF exceeds 3 MB.
+    const samplePdf = await generateInvoicePdf(db, move, { pdfReportId: 'invoices' });
     const threeMb = `data:application/octet-stream;base64,${Buffer.alloc(3 * 1024 * 1024, 66).toString('base64')}`;
+    const threeMbPlusPdfOut = await sendDocument(cfg, res.db, { name: 'Admin', isAdmin: true }, {
+      model: 'account.move',
+      id: move.id,
+      send: {
+        mail_partner_ids: [partner.id],
+        subject: '3 MB Plus PDF',
+        body: 'Should fail',
+        attachments: [
+          { id: 'pdf', kind: 'invoice_pdf', name: 'inv.pdf', type: 'application/pdf', pdf_report_id: 'invoices' },
+          { id: 'too-much', kind: 'custom', name: 'exact.bin', type: 'application/octet-stream', data: threeMb },
+        ],
+      },
+    });
+    assert.equal(threeMbPlusPdfOut.status, 400);
+    assert.equal(threeMbPlusPdfOut.body.error, 'Attachments exceed the 3 MB limit');
+    assert.equal(seen.length, 0);
+    assert.equal(read(res.db, 'account.move', move.id).is_move_sent, false);
+
+    // Total decoded bytes (PDF + extra) one byte over MAX_SEND_ATTACHMENTS_BYTES fails before SMTP.
+    const exactRemaining = Math.max(0, MAX_SEND_ATTACHMENTS_BYTES - samplePdf.length);
+    const overOneByteData = `data:application/octet-stream;base64,${Buffer.alloc(exactRemaining + 1, 66).toString('base64')}`;
+    const overOneOut = await sendDocument(cfg, db, { name: 'Admin', isAdmin: true }, {
+      model: 'account.move',
+      id: move.id,
+      send: {
+        mail_partner_ids: [partner.id],
+        subject: 'One Byte Over',
+        body: 'Should fail',
+        attachments: [
+          { id: 'pdf', kind: 'invoice_pdf', name: 'inv.pdf', type: 'application/pdf', pdf_report_id: 'invoices' },
+          { id: 'over-1', kind: 'custom', name: 'over1.bin', type: 'application/octet-stream', data: overOneByteData },
+        ],
+      },
+    });
+    assert.equal(overOneOut.status, 400);
+    assert.equal(overOneOut.body.error, 'Attachments exceed the 3 MB limit');
+    assert.equal(seen.length, 0);
+
+    // Exactly MAX_SEND_ATTACHMENTS_BYTES across invoice PDF + extra attachment succeeds and sends genuine PDF.
+    const exactRemainingData = `data:application/octet-stream;base64,${Buffer.alloc(exactRemaining, 66).toString('base64')}`;
     const okRes = runSendMoves(db, move, {
       email: true,
       download: false,
@@ -802,7 +862,7 @@ test('SEND1-9: sendDocument enforces 3 MB attachment cap, rejects invalid attach
       body: 'Should succeed',
       attachments: [
         { id: 'pdf', kind: 'invoice_pdf', name: 'inv.pdf', type: 'application/pdf', pdf_report_id: 'invoices' },
-        { id: 'ok-1', kind: 'custom', name: 'exact.bin', type: 'application/octet-stream', data: threeMb },
+        { id: 'ok-1', kind: 'custom', name: 'exact.bin', type: 'application/octet-stream', data: exactRemainingData },
       ],
     });
     const okOut = await sendDocument(cfg, okRes.db, { name: 'Admin', isAdmin: true }, {
@@ -828,6 +888,7 @@ test('SEND1-10: real HTTP /api/mail/document route sends genuine PDFs for single
   let appServer;
   let failServer;
   try {
+    await initSettledDbFile(dbPath);
     appServer = await startServer({
       env: {
         ...process.env,
@@ -998,19 +1059,61 @@ test('SEND1-10: real HTTP /api/mail/document route sends genuine PDFs for single
     assert.equal(smtp.seen.length, 0);
     assert.equal((await fetchMove(invLimit.id)).is_move_sent, false);
 
-    // 5. Exactly 3 MB decoded attachment + invoice_pdf succeeds over real HTTP (within 5 MiB global limit)
+    // 5. Generated invoice_pdf counts toward 3 MB cap over real HTTP (within 5 MiB global limit)
+    const invLimitMove = read(serverDb, 'account.move', invLimit.id);
+    const invLimitPdfBytes = (await generateInvoicePdf(serverDb, invLimitMove, { pdfReportId: 'invoices' })).length;
     const threeMb = `data:application/octet-stream;base64,${Buffer.alloc(3 * 1024 * 1024, 68).toString('base64')}`;
+    const overWithPdfOut = await postMail({
+      model: 'account.move',
+      id: invLimit.id,
+      send: {
+        mail_partner_ids: [partnerRes.id],
+        subject: 'Over 3 MB With PDF HTTP',
+        body: 'Should fail 3 MB cap',
+        pdf_report_id: 'invoices',
+        attachments: [
+          { id: 'pdf', kind: 'invoice_pdf', name: 'inv-limit.pdf', type: 'application/pdf', pdf_report_id: 'invoices' },
+          { id: 'over', kind: 'custom', name: 'three-mb.bin', type: 'application/octet-stream', data: threeMb },
+        ],
+      },
+    });
+    assert.equal(overWithPdfOut.status, 400);
+    assert.equal(overWithPdfOut.body.error, 'Attachments exceed the 3 MB limit');
+    assert.equal(smtp.seen.length, 0);
+    assert.equal((await fetchMove(invLimit.id)).is_move_sent, false);
+
+    const exactHttpExtra = Math.max(0, MAX_SEND_ATTACHMENTS_BYTES - invLimitPdfBytes);
+    const plusOneHttp = `data:application/octet-stream;base64,${Buffer.alloc(exactHttpExtra + 1, 68).toString('base64')}`;
+    const plusOneOut = await postMail({
+      model: 'account.move',
+      id: invLimit.id,
+      send: {
+        mail_partner_ids: [partnerRes.id],
+        subject: 'Plus One HTTP',
+        body: 'Fails 1 byte over',
+        pdf_report_id: 'invoices',
+        attachments: [
+          { id: 'pdf', kind: 'invoice_pdf', name: 'inv-limit.pdf', type: 'application/pdf', pdf_report_id: 'invoices' },
+          { id: 'plus1', kind: 'custom', name: 'plus1.bin', type: 'application/octet-stream', data: plusOneHttp },
+        ],
+      },
+    });
+    assert.equal(plusOneOut.status, 400);
+    assert.equal(plusOneOut.body.error, 'Attachments exceed the 3 MB limit');
+    assert.equal(smtp.seen.length, 0);
+
+    const exactHttpData = `data:application/octet-stream;base64,${Buffer.alloc(exactHttpExtra, 68).toString('base64')}`;
     const exactLimitOut = await postMail({
       model: 'account.move',
       id: invLimit.id,
       send: {
         mail_partner_ids: [partnerRes.id],
         subject: 'Exact 3 MB HTTP',
-        body: 'Fits in 5 MiB JSON limit',
+        body: 'Fits in 3 MB cap + 5 MiB JSON limit',
         pdf_report_id: 'invoices',
         attachments: [
           { id: 'pdf', kind: 'invoice_pdf', name: 'inv-limit.pdf', type: 'application/pdf', pdf_report_id: 'invoices' },
-          { id: 'ok', kind: 'custom', name: 'exact3mb.bin', type: 'application/octet-stream', data: threeMb },
+          { id: 'ok', kind: 'custom', name: 'exact3mb.bin', type: 'application/octet-stream', data: exactHttpData },
         ],
       },
     });
@@ -1021,6 +1124,7 @@ test('SEND1-10: real HTTP /api/mail/document route sends genuine PDFs for single
     await appServer.stop();
     appServer = null;
     const dbPathFail = join(dir, 'fail.sqlite');
+    await initSettledDbFile(dbPathFail);
     failServer = await startServer({
       env: {
         ...process.env,
@@ -1215,6 +1319,7 @@ test('SEND1-12: server rejects duplicate generated invoice_pdf attachments per m
     assert.equal(read(db, 'account.move', move.id).is_move_sent, false);
 
     // Also verify the real HTTP /api/mail/document route rejects duplicate generated PDFs.
+    await initSettledDbFile(dbPath);
     appServer = await startServer({
       env: {
         ...process.env,
@@ -1265,4 +1370,359 @@ test('SEND1-12: server rejects duplicate generated invoice_pdf attachments per m
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     server.close();
   }
+});
+
+test('SEND1-13: stored-blob authorization is scoped strictly to selected authorized invoice template and user read scope', async () => {
+  const { server, seen, cfg } = await fakeSmtp();
+  const sql = new DatabaseSync(':memory:');
+  try {
+    let db = seed();
+    const blobs = openBlobs(sql);
+    const partner = create(db, 'res.partner', { name: 'Blob Auth Buyer', email: 'blobauth@example.com' });
+    const inv = createPostedInvoice(partner.db, { partnerId: partner.id, price: 300 });
+    const exp = create(inv.db, 'hr.expense', {
+      name: 'Secret Expense Receipt',
+      employee_id: 1,
+      receipt: {
+        name: 'secret.txt',
+        type: 'text/plain',
+        size: 13,
+        data: `data:text/plain;base64,${Buffer.from('SECRET-RECEIPT').toString('base64')}`,
+      },
+    });
+    const saleTpl = create(exp.db, 'mail.template', {
+      name: 'Sale Only Tpl',
+      model: 'sale.order',
+      subject: 'SO {{ object.name }}',
+      body: 'Body',
+      attachments: [{
+        name: 'so-terms.txt',
+        file: { name: 'so-terms.txt', type: 'text/plain', size: 10, data: `data:text/plain;base64,${Buffer.from('SALE-TERMS').toString('base64')}` },
+      }],
+    });
+    const invTpl = create(saleTpl.db, 'mail.template', {
+      name: 'Authorized Invoice Tpl',
+      model: 'account.move',
+      subject: 'Inv {{ object.name }}',
+      body: 'Attached terms.',
+      attachments: [{
+        name: 'inv-terms.txt',
+        file: { name: 'inv-terms.txt', type: 'text/plain', size: 9, data: `data:text/plain;base64,${Buffer.from('INV-TERMS').toString('base64')}` },
+      }],
+    });
+    // externalize() only visits top-level declared binary fields; nested mail.template attachment
+    // file objects are not top-level binary fields so they are never touched by the traversal.
+    // Seed synthetic bytes directly into the in-memory SQLite blobs table with stable IDs and
+    // reconstruct the template fixture records with their blob IDs already set.
+    const soTermsBlob = 'aa11bb22cc33dd44ee55ff6600112233';
+    const invTermsBlob = 'bb22cc33dd44ee55ff6600112233aa11';
+    sql.prepare('INSERT INTO blobs (id, type, data) VALUES (?, ?, ?)').run(
+      soTermsBlob, 'text/plain', Buffer.from('SALE-TERMS'),
+    );
+    sql.prepare('INSERT INTO blobs (id, type, data) VALUES (?, ?, ?)').run(
+      invTermsBlob, 'text/plain', Buffer.from('INV-TERMS'),
+    );
+
+    // Patch template records so their nested attachment file objects carry the seeded blob IDs.
+    const patchTpl = (baseDb, tplId, blobId) => {
+      const tpl = read(baseDb, 'mail.template', tplId);
+      const patched = {
+        ...tpl,
+        attachments: tpl.attachments.map((att) => ({
+          ...att,
+          file: { name: att.file?.name, type: att.file?.type, size: att.file?.size, blob: blobId },
+        })),
+      };
+      return {
+        ...baseDb,
+        records: {
+          ...baseDb.records,
+          'mail.template': (baseDb.records['mail.template'] ?? []).map((r) => (r.id === tplId ? patched : r)),
+        },
+      };
+    };
+
+    let withPatched = patchTpl(invTpl.db, saleTpl.id, soTermsBlob);
+    withPatched = patchTpl(withPatched, invTpl.id, invTermsBlob);
+
+    // externalize() externalizes the top-level hr.expense.receipt binary field.
+    db = blobs.externalize(withPatched);
+
+    const expenseBlob = read(db, 'hr.expense', exp.id).receipt.blob;
+    const saleTplBlob = read(db, 'mail.template', saleTpl.id).attachments[0].file.blob;
+    const invTplBlob = read(db, 'mail.template', invTpl.id).attachments[0].file.blob;
+    assert.ok(expenseBlob && saleTplBlob && invTplBlob);
+
+    // 1. Blob referenced elsewhere in DB (hr.expense or sale.order template) is rejected without calling SMTP.
+    const expAttOut = await sendDocument(cfg, db, { name: 'Admin', isAdmin: true }, {
+      model: 'account.move',
+      id: inv.id,
+      send: {
+        template_id: invTpl.id,
+        mail_partner_ids: [partner.id],
+        subject: 'Forbidden DB Blob',
+        body: 'x',
+        attachments: [{ id: 'bad-exp', kind: 'template', name: 'secret.txt', type: 'text/plain', blob: expenseBlob }],
+      },
+    }, { blobs });
+    assert.equal(expAttOut.status, 403);
+    assert.equal(seen.length, 0);
+
+    const otherTplOut = await sendDocument(cfg, db, { name: 'Admin', isAdmin: true }, {
+      model: 'account.move',
+      id: inv.id,
+      send: {
+        template_id: invTpl.id,
+        mail_partner_ids: [partner.id],
+        subject: 'Wrong Tpl Blob',
+        body: 'x',
+        attachments: [{ id: 'bad-sale', kind: 'template', name: 'so-terms.txt', type: 'text/plain', blob: saleTplBlob }],
+      },
+    }, { blobs });
+    assert.equal(otherTplOut.status, 403);
+    assert.equal(seen.length, 0);
+
+    // 2. Explicitly selecting a template for another model (sale.order) is rejected.
+    const wrongModelTplOut = await sendDocument(cfg, db, { name: 'Admin', isAdmin: true }, {
+      model: 'account.move',
+      id: inv.id,
+      send: {
+        template_id: saleTpl.id,
+        mail_partner_ids: [partner.id],
+        subject: 'Wrong Model Template',
+        body: 'x',
+        attachments: [{ id: 'sale', kind: 'template', name: 'so-terms.txt', type: 'text/plain', blob: saleTplBlob }],
+      },
+    }, { blobs });
+    assert.equal(wrongModelTplOut.status, 400);
+    assert.equal(seen.length, 0);
+
+    // 3. Requesting user without mail.template read scope cannot authorize template blobs.
+    const noTplScopeOut = await sendDocument(cfg, db, { name: 'Restricted', isAdmin: false }, {
+      model: 'account.move',
+      id: inv.id,
+      send: {
+        template_id: invTpl.id,
+        mail_partner_ids: [partner.id],
+        subject: 'No Tpl Scope',
+        body: 'x',
+        attachments: [{ id: 'ok', kind: 'template', name: 'inv-terms.txt', type: 'text/plain', blob: invTplBlob }],
+      },
+    }, {
+      blobs,
+      readable: new Set(['account.move', 'res.partner']),
+      writeOptions: { author: 'Restricted', isAdmin: false, allowed: new Set(['account.move', 'mail.message']) },
+    });
+    assert.equal(noTplScopeOut.status, 403);
+    assert.equal(seen.length, 0);
+
+    // 4. Selecting the authorized account.move template delivers both its allowed attachment blob and generated invoice PDF.
+    const allowedOut = await sendDocument(cfg, db, { name: 'Admin', isAdmin: true }, {
+      model: 'account.move',
+      id: inv.id,
+      send: {
+        template_id: invTpl.id,
+        mail_partner_ids: [partner.id],
+        subject: 'Valid Template Att',
+        body: 'Attached terms.',
+        attachments: [
+          { id: 'pdf', kind: 'invoice_pdf', name: 'inv.pdf', type: 'application/pdf', pdf_report_id: 'invoices' },
+          { id: 'tpl', kind: 'template', name: 'inv-terms.txt', type: 'text/plain', blob: invTplBlob },
+        ],
+      },
+    }, { blobs });
+    assert.equal(allowedOut.status, 200);
+    assert.equal(read(allowedOut.db, 'account.move', inv.id).is_move_sent, true);
+    const parts = extractSmtpAttachments(seen);
+    assert.ok(parts.some((p) => p.filename === 'inv.pdf' && p.content.toString('latin1').startsWith('%PDF-1.4')));
+    const termsPart = parts.find((p) => p.filename === 'inv-terms.txt');
+    assert.ok(termsPart && termsPart.content.toString('utf8') === 'INV-TERMS');
+  } finally {
+    sql.close();
+    server.close();
+  }
+});
+
+test('SEND1-14: sendDocument validates state/chatter transition before SMTP for wizard and legacy branches, and HTTP preserves delivered: true on late conflict', async () => {
+  const { server, seen, cfg } = await fakeSmtp();
+  const dir = mkdtempSync(join(tmpdir(), 'mizan-send1-delivered-'));
+  const dbPath = join(dir, 'test.sqlite');
+  let appServer;
+  let midSmtp;
+  try {
+    let db = seed();
+    const partner = create(db, 'res.partner', { name: 'Transition Buyer', email: 'trans@example.com' });
+    const inv = createPostedInvoice(partner.db, { partnerId: partner.id, price: 220 });
+    const order = create(inv.db, 'sale.order', { partner_id: partner.id, order_line: [{ product_id: 1, qty: 1, price_unit: 100 }] });
+    db = order.db;
+
+    // 1. Pre-SMTP write validation rejects wizard branch before contacting SMTP.
+    const wizardDenied = await sendDocument(cfg, db, { name: 'ReadOnly', isAdmin: false }, {
+      model: 'account.move',
+      id: inv.id,
+      send: { mail_partner_ids: [partner.id], subject: 'No Write', body: 'x', attachments: [] },
+    }, {
+      readable: new Set(['account.move', 'res.partner', 'mail.template']),
+      writeOptions: { author: 'ReadOnly', isAdmin: false, allowed: new Set(['res.partner']) },
+    });
+    assert.equal(wizardDenied.status, 403);
+    assert.equal(wizardDenied.db, undefined);
+    assert.equal(seen.length, 0);
+    assert.equal(read(db, 'account.move', inv.id).is_move_sent, false);
+
+    // 2. Pre-SMTP write validation rejects legacy branch before contacting SMTP.
+    const legacyDenied = await sendDocument(cfg, db, { name: 'ReadOnly', isAdmin: false }, {
+      model: 'sale.order',
+      id: order.id,
+    }, {
+      readable: new Set(['sale.order', 'res.partner']),
+      writeOptions: { author: 'ReadOnly', isAdmin: false, allowed: new Set(['res.partner']) },
+    });
+    assert.equal(legacyDenied.status, 403);
+    assert.equal(legacyDenied.db, undefined);
+    assert.equal(seen.length, 0);
+    assert.equal(read(db, 'sale.order', order.id).state, 'draft');
+
+    // 3. HTTP /api/mail/document returns delivered: true if database epoch changes while SMTP delivers.
+    let midCookie = null;
+    let bumped = false;
+    midSmtp = await fakeSmtp({
+      onData: async () => {
+        if (bumped || !appServer || !midCookie) return;
+        bumped = true;
+        const backupRes = await fetch(`${appServer.origin}/api/backup`, { headers: { Cookie: midCookie } });
+        const backup = await backupRes.json();
+        await fetch(`${appServer.origin}/api/restore`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', Cookie: midCookie },
+          body: JSON.stringify({ backup, confirm: 'RESTORE' }),
+        });
+      },
+    });
+    const password = 'test-admin-password';
+    await initSettledDbFile(dbPath);
+    appServer = await startServer({
+      env: {
+        ...process.env,
+        PORT: '0',
+        MIZAN_DB: dbPath,
+        MIZAN_ADMIN_PASSWORD: password,
+        MIZAN_SMTP_HOST: midSmtp.cfg.host,
+        MIZAN_SMTP_PORT: String(midSmtp.cfg.port),
+        MIZAN_SMTP_FROM: midSmtp.cfg.from,
+        MIZAN_PUBLIC_URL: '',
+        MIZAN_SECURE_COOKIE: '0',
+      },
+    });
+    const loginRes = await fetch(`${appServer.origin}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan' },
+      body: JSON.stringify({ login: 'admin', password }),
+    });
+    midCookie = loginRes.headers.get('set-cookie').split(';')[0];
+    const dbRes = await fetch(`${appServer.origin}/api/db`, { headers: { Cookie: midCookie } });
+    const epoch = dbRes.headers.get('x-mizan-epoch');
+    const baseDb = await dbRes.json();
+    const hp = create(baseDb, 'res.partner', { name: 'Epoch Co', email: 'epoch@example.com' });
+    const hinv = createPostedInvoice(hp.db, { partnerId: hp.id, price: 310 });
+    const diffRes = await fetch(`${appServer.origin}/api/diff`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', 'X-Mizan-Epoch': epoch, Cookie: midCookie },
+      body: JSON.stringify(diffDb(baseDb, hinv.db)),
+    });
+    assert.equal(diffRes.status, 200);
+
+    const conflictOut = await fetch(`${appServer.origin}/api/mail/document`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mizan', Cookie: midCookie },
+      body: JSON.stringify({
+        model: 'account.move',
+        id: hinv.id,
+        send: {
+          mail_partner_ids: [hp.id],
+          subject: 'Mid-Delivery Restore',
+          body: 'Delivered before restore.',
+          attachments: [{ id: 'pdf', kind: 'invoice_pdf', name: 'inv.pdf', type: 'application/pdf', pdf_report_id: 'invoices' }],
+        },
+      }),
+    });
+    assert.equal(conflictOut.status, 409);
+    const conflictBody = await conflictOut.json();
+    assert.equal(conflictBody.delivered, true);
+  } finally {
+    await appServer?.stop();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    midSmtp?.server.close();
+    server.close();
+  }
+});
+
+test('SEND1-15: long wrapped invoice lines and section/note lines paginate across pages with repeated table headers', async () => {
+  const db0 = seed();
+  const partner = create(db0, 'res.partner', { name: 'Paginated Co', email: 'pages@example.com' });
+  const longNote = Array.from({ length: 75 }, (_, i) => `NOTE-SEG-${String(i + 1).padStart(2, '0')} comprehensive contract delivery term clause`).join(' ');
+  const longDesc = Array.from({ length: 75 }, (_, i) => `LINE-SEG-${String(i + 1).padStart(2, '0')} enterprise implementation milestone specification`).join(' ');
+  const inv = create(partner.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [
+      { display_type: 'line_note', name: longNote },
+      { product_id: 1, name: longDesc, qty: 2, price_unit: 500, tax: 0 },
+    ],
+  });
+  const posted = postMove(inv.db, inv.id);
+  const move = read(posted, 'account.move', inv.id);
+  const pdf = await generateInvoicePdf(posted, move, { pdfReportId: 'invoices', lang: 'en' });
+  const info = inspectPdf(pdf);
+
+  assert.ok(info.text.includes('Page 1 of '), 'Multi-page PDF should number page 1');
+  assert.ok(info.text.includes('Page 2 of '), 'Long wrapped note and line must paginate to at least page 2');
+  const repeatedDescHeaders = info.actualTexts.filter((t) => t === 'Description').length;
+  assert.ok(repeatedDescHeaders >= 2, `Table header Description should repeat on continuation pages (got ${repeatedDescHeaders})`);
+  assert.ok(info.text.includes('NOTE-SEG-01') && info.text.includes('NOTE-SEG-75'), 'Full wrapped note must be preserved across pages');
+  assert.ok(info.text.includes('LINE-SEG-01') && info.text.includes('LINE-SEG-75'), 'Full wrapped invoice line must be preserved across pages');
+});
+
+test('SEND1-16: renders Cyrillic and Greek original text via scoped Noto Sans fonts and rejects genuinely missing glyphs', async () => {
+  let db = seed();
+  db = write(db, 'res.company', 1, { name: 'شركة النيل - ООО "Тест"' });
+  const partner = create(db, 'res.partner', { name: 'Александр Петров ҐЇЄ (ΑΒΓ Δοκιμή ἀ)', email: 'cyr@example.com' });
+  const prod = create(partner.db, 'product', { name: 'Лицензия ΑΒΓ Δοκιμή', list_price: 120 });
+  const inv = create(prod.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: partner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ product_id: prod.id, qty: 1, price_unit: 120, tax: 0 }],
+  });
+  db = postMove(inv.db, inv.id);
+  const move = read(db, 'account.move', inv.id);
+
+  const pdf = await generateInvoicePdf(db, move, { pdfReportId: 'invoices', lang: 'en' });
+  const info = inspectPdf(pdf);
+  const glyphText = info.glyphBlocks.map((g) => g.visualLtr).join('');
+  assert.ok(info.text.includes('شركة النيل'), 'Covered Arabic text remains intact');
+  assert.ok(info.text.includes('ООО "Тест"'), 'Cyrillic company name preserves exact original text');
+  assert.ok(info.text.includes('Александр Петров ҐЇЄ (ΑΒΓ Δοκιμή ἀ)'), 'Cyrillic-ext and Greek-ext partner name preserves exact original text');
+  assert.ok(info.text.includes('Лицензия ΑΒΓ Δοκιμή'), 'Cyrillic and Greek product name preserves exact original text');
+  assert.ok(glyphText.includes('Александр') && glyphText.includes('Петров') && glyphText.includes('ҐЇЄ'), 'Cyrillic(-ext) glyphs map via ToUnicode CMap');
+  assert.ok(glyphText.includes('ΑΒΓ') && glyphText.includes('Δοκιμή') && glyphText.includes('ἀ'), 'Greek(-ext) glyphs map via ToUnicode CMap');
+
+  const unsupportedPartner = create(db, 'res.partner', { name: 'Unsupported 中文 😀', email: 'cjk@example.com' });
+  const unsupportedInv = create(unsupportedPartner.db, 'account.move', {
+    move_type: 'out_invoice',
+    partner_id: unsupportedPartner.id,
+    invoice_date: today(),
+    invoice_line_ids: [{ product_id: prod.id, qty: 1, price_unit: 120, tax: 0 }],
+  });
+  const unsupportedDb = postMove(unsupportedInv.db, unsupportedInv.id);
+  const unsupportedMove = read(unsupportedDb, 'account.move', unsupportedInv.id);
+  assert.equal(
+    UNSUPPORTED_UNICODE_PDF_ERROR,
+    'The invoice PDF cannot render some characters. Attach a PDF or remove the generated attachment.',
+  );
+  await assert.rejects(
+    () => generateInvoicePdf(unsupportedDb, unsupportedMove, { pdfReportId: 'invoices', lang: 'en' }),
+    { message: 'The invoice PDF cannot render some characters. Attach a PDF or remove the generated attachment.' },
+  );
 });

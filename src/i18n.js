@@ -4350,7 +4350,7 @@ const ar = {
   'Invalid attachment': 'مرفق غير صالح',
   'Invalid invoice report': 'تقرير فاتورة غير صالح',
   'Only one generated invoice PDF attachment is allowed': 'يُسمح بمرفق PDF واحد فقط مُنشأ للفاتورة',
-  'Invoice PDF generation does not support non-Latin or Arabic characters without a Unicode PDF renderer or embedded TTF font': 'لا يدعم إنشاء ملف PDF للفاتورة الأحرف العربية أو غير اللاتينية بدون عارض PDF يدعم Unicode أو خط TTF مُضمّن',
+  'The invoice PDF cannot render some characters. Attach a PDF or remove the generated attachment.': 'يتعذر عرض بعض الأحرف في ملف PDF للفاتورة. أرفق ملف PDF أو أزل المرفق المُنشأ تلقائيًا.',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */

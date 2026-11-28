@@ -31,11 +31,15 @@ const FONT_PATHS = {
   Le: req.resolve('@fontsource-variable/noto-sans-arabic/files/noto-sans-arabic-latin-ext-wght-normal.woff2'),
   Ma: req.resolve('@fontsource-variable/noto-sans-arabic/files/noto-sans-arabic-math-wght-normal.woff2'),
   Sy: req.resolve('@fontsource-variable/noto-sans-arabic/files/noto-sans-arabic-symbols-wght-normal.woff2'),
+  Cy: req.resolve('@fontsource-variable/noto-sans/files/noto-sans-cyrillic-wght-normal.woff2'),
+  Ce: req.resolve('@fontsource-variable/noto-sans/files/noto-sans-cyrillic-ext-wght-normal.woff2'),
+  Gr: req.resolve('@fontsource-variable/noto-sans/files/noto-sans-greek-wght-normal.woff2'),
+  Ge: req.resolve('@fontsource-variable/noto-sans/files/noto-sans-greek-ext-wght-normal.woff2'),
 };
 
 const bidi = bidiFactory();
 
-export const UNSUPPORTED_UNICODE_PDF_ERROR = 'Invoice PDF generation does not support non-Latin or Arabic characters without a Unicode PDF renderer or embedded TTF font';
+export const UNSUPPORTED_UNICODE_PDF_ERROR = 'The invoice PDF cannot render some characters. Attach a PDF or remove the generated attachment.';
 
 const toHexColor = ([r, g, b]) =>
   '#' + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')).join('');
@@ -110,7 +114,9 @@ function createPdfBuilder(footerLeft, isRtl, tr) {
   const pickFontKey = (cp, rtl) => {
     if (cp === 0x20) return rtl ? 'Ar' : 'La';
     if (cp === 0x200c || cp === 0x200d) return 'Ar';
-    const order = rtl ? ['Ar', 'La', 'Le', 'Ma', 'Sy'] : ['La', 'Ar', 'Le', 'Ma', 'Sy'];
+    const order = rtl
+      ? ['Ar', 'La', 'Le', 'Cy', 'Ce', 'Gr', 'Ge', 'Ma', 'Sy']
+      : ['La', 'Ar', 'Le', 'Cy', 'Ce', 'Gr', 'Ge', 'Ma', 'Sy'];
     for (const key of order) {
       if (ensureFont(key, false).raw.hasGlyphForCodePoint(cp)) return key;
     }
@@ -428,21 +434,26 @@ export async function generateInvoicePdf(db, move, { pdfReportId = 'invoices', c
   };
 
   drawLinesHeader();
+  const ROW_LINE_H = 12;
+  const ROW_PAD_BOTTOM = 6;
+  const singlePageLinesCap = PAGE_H - MARGIN_BOTTOM - (MARGIN_TOP + 34);
   const fullRowX = isRtl ? PAGE_W - MARGIN_X - 4 : MARGIN_X + 4;
   for (const l of lines) {
     if (isSectionOrNote(l)) {
       const wrapped = pdf.wrapText(l.name ?? '', CONTENT_W - 8, 9, l.display_type === 'line_section');
-      const rowH = wrapped.length * 12 + 6;
-      pdf.ensureSpace(rowH, drawLinesHeader);
+      const rowH = wrapped.length * ROW_LINE_H + ROW_PAD_BOTTOM;
+      pdf.ensureSpace(rowH <= singlePageLinesCap ? rowH : ROW_LINE_H + ROW_PAD_BOTTOM, drawLinesHeader);
       for (let i = 0; i < wrapped.length; i++) {
-        pdf.drawText(fullRowX, pdf.y + i * 12, wrapped[i], {
+        pdf.ensureSpace(ROW_LINE_H, drawLinesHeader);
+        pdf.drawText(fullRowX, pdf.y, wrapped[i], {
           size: 9,
           bold: l.display_type === 'line_section',
           color: l.display_type === 'line_section' ? dark : muted,
           align: textAlign,
         });
+        pdf.y += ROW_LINE_H;
       }
-      pdf.y += rowH;
+      pdf.y += ROW_PAD_BOTTOM;
       pdf.drawLine(MARGIN_X, pdf.y - 4, PAGE_W - MARGIN_X, pdf.y - 4, { width: 0.4, color: [0.89, 0.91, 0.94] });
       continue;
     }
@@ -453,23 +464,28 @@ export async function generateInvoicePdf(db, move, { pdfReportId = 'invoices', c
     const taxCol = cols.find((c) => c.key === 'tax');
     const taxWrapped = pdf.wrapText(lineTaxDisplay(l), taxCol.w, 8.5);
     const lineCount = Math.max(descWrapped.length, taxWrapped.length, 1);
-    const rowH = lineCount * 12 + 6;
-    pdf.ensureSpace(rowH, drawLinesHeader);
+    const rowH = lineCount * ROW_LINE_H + ROW_PAD_BOTTOM;
+    pdf.ensureSpace(rowH <= singlePageLinesCap ? rowH : ROW_LINE_H + ROW_PAD_BOTTOM, drawLinesHeader);
 
-    const topY = pdf.y;
-    for (let i = 0; i < descWrapped.length; i++) {
-      pdf.drawText(cols[0].x, topY + i * 12, descWrapped[i], { size: 9, color: dark, align: textAlign });
+    for (let i = 0; i < lineCount; i++) {
+      pdf.ensureSpace(ROW_LINE_H, drawLinesHeader);
+      if (i === 0) {
+        pdf.drawText(cols[1].x, pdf.y, String(l.qty ?? 0), { size: 9, color: dark, align: numAlign });
+        pdf.drawText(cols[2].x, pdf.y, money(l.price_unit ?? 0), { size: 9, color: dark, align: numAlign });
+        if (hasDiscount) {
+          pdf.drawText(cols[3].x, pdf.y, `${Number(l.discount) || 0}%`, { size: 9, color: dark, align: numAlign });
+        }
+        pdf.drawText(cols.at(-1).x, pdf.y, money(subtotal(l)), { size: 9, color: dark, align: numAlign });
+      }
+      if (i < descWrapped.length) {
+        pdf.drawText(cols[0].x, pdf.y, descWrapped[i], { size: 9, color: dark, align: textAlign });
+      }
+      if (i < taxWrapped.length) {
+        pdf.drawText(taxCol.x, pdf.y, taxWrapped[i], { size: 8.5, color: muted, align: textAlign });
+      }
+      pdf.y += ROW_LINE_H;
     }
-    pdf.drawText(cols[1].x, topY, String(l.qty ?? 0), { size: 9, color: dark, align: numAlign });
-    pdf.drawText(cols[2].x, topY, money(l.price_unit ?? 0), { size: 9, color: dark, align: numAlign });
-    if (hasDiscount) {
-      pdf.drawText(cols[3].x, topY, `${Number(l.discount) || 0}%`, { size: 9, color: dark, align: numAlign });
-    }
-    for (let i = 0; i < taxWrapped.length; i++) {
-      pdf.drawText(taxCol.x, topY + i * 11, taxWrapped[i], { size: 8.5, color: muted, align: textAlign });
-    }
-    pdf.drawText(cols.at(-1).x, topY, money(subtotal(l)), { size: 9, color: dark, align: numAlign });
-    pdf.y += rowH;
+    pdf.y += ROW_PAD_BOTTOM;
     pdf.drawLine(MARGIN_X, pdf.y - 4, PAGE_W - MARGIN_X, pdf.y - 4, { width: 0.4, color: [0.89, 0.91, 0.94] });
   }
 

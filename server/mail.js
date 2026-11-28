@@ -1,16 +1,15 @@
 // Email actions: send a business document to its partner, or a mailing to its list.
-import { models } from '../src/models/index.js';
+import { models, modelsForApps, readOnlyForApps, writableModelsForApps } from '../src/models/index.js';
 import { postNote, read, write } from '../src/orm.js';
 import { ConflictError, applyDiff, diffDb } from '../src/sync.js';
 import { sendMail } from './smtp.js';
 import { deliverMailing } from './mailtrack.js';
-import { addressLines, documentCompany, documentTaxBreakdown } from '../src/models/company.js';
+import { addressLines, documentCompany, documentTaxBreakdown, visibleTo } from '../src/models/company.js';
 import { subtotal, today, validDate } from '../src/models/common.js';
 import { customerStatement } from '../src/models/reports.js';
 import { followUpEmail, followUpLetter, levelChannels, logManualFollowUp, partnerFollowUp } from '../src/models/finance.js';
 import { defaultInvoiceMailTemplate, isValidEmailAddress, renderInvoiceMailTemplate } from '../src/models/invoiceSend.js';
 import { findCompanyCurrencyRecord, formatCurrency } from '../src/money.js';
-import { referencesBlob } from './blobs.js';
 import { generateInvoicePdf } from './invoicePdf.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
@@ -127,12 +126,12 @@ const safeAttachmentFilename = (name) => String(name || 'attachment').replace(/[
 export const MAX_SEND_ATTACHMENTS_BYTES = 3 * 1024 * 1024;
 const VALID_INVOICE_REPORTS = new Set(['invoices', 'invoices_without_payment', 'without_payment']);
 
-const isAccessibleTemplateBlob = (db, blobId) => (
-  (db.records?.['mail.template'] ?? []).some((tpl) => (tpl.attachments ?? []).some((att) => att?.file?.blob === blobId))
-  || referencesBlob(db, blobId)
-);
+const preSmtpTransitionError = (err) => ({
+  status: err?.status ?? (/No access|not allowed|read.?only/i.test(String(err?.message ?? '')) ? 403 : 400),
+  body: { error: err?.message || 'Invalid transition' },
+});
 
-function decodeDataUrlAttachment(att, db = null, blobs = null) {
+function decodeDataUrlAttachment(att, authorizedTemplate = null, blobs = null) {
   if (!att || typeof att !== 'object') return null;
   if (att.content != null) {
     return {
@@ -156,7 +155,12 @@ function decodeDataUrlAttachment(att, db = null, blobs = null) {
       content: bytes,
     };
   }
-  if (typeof att.blob === 'string' && /^[0-9a-f]{32}$/.test(att.blob) && db && blobs && isAccessibleTemplateBlob(db, att.blob)) {
+  if (typeof att.blob === 'string') {
+    if (!/^[0-9a-f]{32}$/.test(att.blob) || !blobs) return null;
+    const isTemplateBlob = (authorizedTemplate?.attachments ?? []).some((tplAtt) => tplAtt?.file?.blob === att.blob);
+    if (!isTemplateBlob) {
+      throw Object.assign(new Error('No access to attachment'), { status: 403 });
+    }
     const stored = blobs.get(att.blob);
     if (!stored) return null;
     return {
@@ -171,10 +175,27 @@ function decodeDataUrlAttachment(att, db = null, blobs = null) {
 /**
  * @returns {Promise<{status: number, body: object, db?: object}>}
  */
-export async function sendDocument(cfg, db, _user, { model, id, send = null }, { blobs = null } = {}) {
+export async function sendDocument(cfg, db, user, { model, id, send = null }, { blobs = null, writeOptions = null, readable = null } = {}) {
+  const effectiveReadable = readable ?? (user && !user.isAdmin && user.apps?.length ? modelsForApps(user.apps) : null);
+  const effectiveCompanies = writeOptions?.companies ?? (user?.companies ? new Set(user.companies) : null);
+  const effectiveWriteOpts = writeOptions ?? {
+    author: user?.name ?? user?.author ?? 'User',
+    isAdmin: Boolean(user?.isAdmin),
+    ...(user?.login ? { login: user.login } : {}),
+    ...(!user?.isAdmin && user?.apps?.length && user.allowed === undefined
+      ? { allowed: writableModelsForApps(user.apps), readOnly: readOnlyForApps(user.apps) }
+      : {}),
+    ...(user?.allowed !== undefined ? { allowed: user.allowed } : {}),
+    ...(user?.readOnly !== undefined ? { readOnly: user.readOnly } : {}),
+    ...(effectiveCompanies ? { companies: effectiveCompanies } : {}),
+  };
+
+  if (effectiveReadable && !effectiveReadable.has(model)) {
+    return { status: 403, body: { error: `No access to ${model}` } };
+  }
   if (!DOCUMENTS[model]) return { status: 400, body: { error: 'This document cannot be emailed' } };
   const rec = read(db, model, Number(id));
-  if (!rec) return { status: 404, body: { error: 'Record not found' } };
+  if (!rec || !visibleTo(effectiveCompanies, model, rec, db)) return { status: 404, body: { error: 'Record not found' } };
   if (model === 'account.move' && rec.state !== 'posted') return { status: 400, body: { error: 'Only posted invoices can be emailed.' } };
   const company = documentCompany(db, rec);
   if (!company) return { status: 400, body: { error: 'Configure the document company before emailing.' } };
@@ -190,12 +211,39 @@ export async function sendDocument(cfg, db, _user, { model, id, send = null }, {
       const p = read(db, 'res.partner', pid);
       if (!primaryPartner) primaryPartner = p;
       const addr = String(p?.email ?? '').trim();
-      if (!p || !addr) return { status: 400, body: { error: 'The customer has no email address' } };
+      if (!p || !visibleTo(effectiveCompanies, 'res.partner', p, db) || !addr) {
+        return { status: 400, body: { error: 'The customer has no email address' } };
+      }
       if (!isValidEmailAddress(addr)) return { status: 400, body: { error: 'Enter a valid email address' } };
       if (!recipients.includes(addr)) recipients.push(addr);
     }
 
-    const tpl = send.template_id ? read(db, 'mail.template', Number(send.template_id)) : defaultInvoiceMailTemplate(db, rec);
+    const canReadTemplates = !effectiveReadable || effectiveReadable.has('mail.template');
+    const hasExplicitTemplate = send.template_id != null && send.template_id !== '';
+    let tpl = null;
+    if (hasExplicitTemplate) {
+      if (!canReadTemplates) return { status: 403, body: { error: 'No access to mail.template' } };
+      const candidate = read(db, 'mail.template', Number(send.template_id));
+      if (
+        !candidate
+        || !visibleTo(effectiveCompanies, 'mail.template', candidate, db)
+        || (candidate.model && candidate.model !== model)
+        || (candidate.company_id && rec.company_id && Number(candidate.company_id) !== Number(rec.company_id))
+      ) {
+        return { status: 400, body: { error: 'Invalid mail template' } };
+      }
+      tpl = candidate;
+    } else if (canReadTemplates) {
+      const candidate = defaultInvoiceMailTemplate(db, rec);
+      if (
+        candidate
+        && visibleTo(effectiveCompanies, 'mail.template', candidate, db)
+        && (!candidate.company_id || !rec.company_id || Number(candidate.company_id) === Number(rec.company_id))
+      ) {
+        tpl = candidate;
+      }
+    }
+
     const langCode = send.lang || primaryPartner?.lang || 'en';
     const fallback = tpl ? renderInvoiceMailTemplate(db, tpl, rec, langCode) : null;
     const baseEmail = fallback?.subject || fallback?.body ? null : documentEmail(db, model, rec, company);
@@ -225,6 +273,10 @@ export async function sendDocument(cfg, db, _user, { model, id, send = null }, {
         } catch (err) {
           return { status: 400, body: { error: err.message } };
         }
+        decodedAttachmentBytes += pdfBytes.length;
+        if (decodedAttachmentBytes > MAX_SEND_ATTACHMENTS_BYTES) {
+          return { status: 400, body: { error: 'Attachments exceed the 3 MB limit' } };
+        }
         const rawBase = String(att.name || rec.name || `invoice-${rec.id}`).replace(/\.html?$/i, '');
         const filename = safeAttachmentFilename(rawBase.toLowerCase().endsWith('.pdf') ? rawBase : `${rawBase}.pdf`);
         smtpAttachments.push({
@@ -233,7 +285,12 @@ export async function sendDocument(cfg, db, _user, { model, id, send = null }, {
           content: pdfBytes,
         });
       } else {
-        const decoded = decodeDataUrlAttachment(att, db, blobs);
+        let decoded;
+        try {
+          decoded = decodeDataUrlAttachment(att, tpl, blobs);
+        } catch (err) {
+          return { status: err.status ?? 400, body: { error: err.message || 'Invalid attachment' } };
+        }
         if (!decoded) {
           return { status: 400, body: { error: 'Invalid attachment' } };
         }
@@ -247,14 +304,6 @@ export async function sendDocument(cfg, db, _user, { model, id, send = null }, {
       }
     }
 
-    await sendMail(cfg, {
-      to: recipients,
-      subject,
-      text,
-      html,
-      ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
-    });
-    let next = write(db, model, rec.id, { is_move_sent: true });
     const attMeta = smtpAttachments.map((a) => ({
       name: a.filename,
       type: a.contentType,
@@ -262,19 +311,42 @@ export async function sendDocument(cfg, db, _user, { model, id, send = null }, {
     }));
     const attNote = attMeta.length ? `\nAttachments: ${attMeta.map((a) => a.name).join(', ')}` : '';
     const noteBody = `Sent by email to ${recipients.join(', ')}${subject ? ` — ${subject}` : ''}${attNote}`;
+    let next = write(db, model, rec.id, { is_move_sent: true });
     next = postNote(next, model, rec.id, noteBody, null, attMeta.length ? { attachments: attMeta } : null);
-    return { status: 200, body: { ok: true }, db: next };
+    let validated;
+    try {
+      validated = applyDiff(db, diffDb(db, next), effectiveWriteOpts);
+    } catch (err) {
+      return preSmtpTransitionError(err);
+    }
+
+    await sendMail(cfg, {
+      to: recipients,
+      subject,
+      text,
+      html,
+      ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
+    });
+    return { status: 200, body: { ok: true }, db: validated };
   }
 
   const partner = read(db, 'res.partner', rec.partner_id);
-  if (!partner?.email) return { status: 400, body: { error: 'The customer has no email address' } };
+  if (!partner || !visibleTo(effectiveCompanies, 'res.partner', partner, db) || !partner.email) {
+    return { status: 400, body: { error: 'The customer has no email address' } };
+  }
   const email = { to: partner.email, ...documentEmail(db, model, rec, company) };
-  await sendMail(cfg, email);
   const nextState = DOCUMENTS[model][rec.state];
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
   if (model === 'account.move' && rec.state === 'posted') next = write(next, model, rec.id, { is_move_sent: true });
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
-  return { status: 200, body: { ok: true }, db: next };
+  let validated;
+  try {
+    validated = applyDiff(db, diffDb(db, next), effectiveWriteOpts);
+  } catch (err) {
+    return preSmtpTransitionError(err);
+  }
+  await sendMail(cfg, email);
+  return { status: 200, body: { ok: true }, db: validated };
 }
 
 /** Deliver one company-scoped customer statement using the accounting report calculation. */
