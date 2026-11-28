@@ -11,7 +11,7 @@ import { applyDiff, diffDb } from './sync.js';
 import { cleanRecord } from './validate.js';
 import { accountId, analyticMoveItems, balanceSheet, hasAnalyticAllocation, journalId, journalItems, postEntry, profitAndLoss } from './models/ledger.js';
 import { upsertCurrencyRate } from './models/currency.js';
-import { configurableReport, findStatementReport } from './models/configurableReports.js';
+import { configurableReport, configurableReportLegacy, findStatementReport } from './models/configurableReports.js';
 import { addDays, today } from './models/common.js';
 import { payMove, postMove } from './models/accounting.js';
 import { confirmAsset, disposeAsset, postDepreciation } from './models/assets.js';
@@ -1021,4 +1021,116 @@ test('CFI-1 regression: direct cash flow keys sourceMoveIds and drill links by s
   } finally {
     await React.act(async () => root.unmount());
   }
+});
+
+test('CFI-1 regression: configurableReportLegacy earnings include earlier fiscal current/prior offsets while keeping period rows and unfiltered control intact', () => {
+  let db = seed();
+  db = {
+    ...db,
+    records: {
+      ...db.records,
+      'account.move': [],
+      'account.payment': [],
+      'account.asset': [],
+      'account.bank.statement.line': [],
+      'account.deferral': [],
+    },
+  };
+  const plan = create(db, 'account.analytic.plan', { name: 'Projects', default_applicability: 'optional' });
+  db = plan.db;
+  const alpha = create(db, 'account.analytic.account', { name: 'Project Alpha', code: 'PRJ-A', plan_id: plan.id });
+  db = alpha.db;
+
+  // Prior fiscal year mixed-sign voucher (2040-12-20): 130 project expense, 30 unallocated credit, 100 bank credit.
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2040-12-20',
+    ref: 'Prior-year mixed-sign voucher',
+    lines: [
+      { account: '600000', debit: 130, analytic_distribution: { [alpha.id]: 100 } },
+      { account: '400000', credit: 30 },
+      { account: '101401', credit: 100 },
+    ],
+  }).db;
+
+  // Current fiscal year mixed-sign voucher earlier than period.from (2041-01-15): 260 project expense, 60 unallocated credit, 200 bank credit.
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-01-15',
+    ref: 'Earlier current-year mixed-sign voucher',
+    lines: [
+      { account: '600000', debit: 260, analytic_distribution: { [alpha.id]: 100 } },
+      { account: '400000', credit: 60 },
+      { account: '101401', credit: 200 },
+    ],
+  }).db;
+
+  // Unrelated unallocated current-year expense earlier than period.from (2041-01-20): only affects unfiltered control.
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-01-20',
+    ref: 'General unallocated expense',
+    lines: [
+      { account: '630000', debit: 40 },
+      { account: '101401', credit: 40 },
+    ],
+  }).db;
+
+  // In-period project expense (2041-03-10).
+  db = postEntry(db, {
+    journal: 'BNK1',
+    date: '2041-03-10',
+    ref: 'March project expense',
+    lines: [
+      { account: '600000', debit: 50, analytic_distribution: { [alpha.id]: 100 } },
+      { account: '101401', credit: 50 },
+    ],
+  }).db;
+
+  // Custom range-scoped legacy report combining period-bound account rows with fiscal earnings lines.
+  const customReport = {
+    id: 99910,
+    name: 'Project Earnings & Period Activity',
+    company_id: 1,
+    kind: '',
+    date_scope: 'range',
+    exclude_closing: true,
+    line_ids: [
+      { name: 'Period Expenses', code: 'PERIOD_EXP', sequence: 10, parent_code: '', formula: 'type:expense', sign: 1, foldable: true, strong: false },
+      { name: 'Current Year Earnings', code: 'CYE', sequence: 20, parent_code: '', formula: 'earnings:current_year', sign: -1, foldable: true, strong: false },
+      { name: 'Prior Years Earnings', code: 'PYE', sequence: 30, parent_code: '', formula: 'earnings:prior_years', sign: -1, foldable: true, strong: false },
+    ],
+  };
+  const period = { from: '2041-03-01', to: '2041-03-31' };
+
+  const projectOut = configurableReport(db, customReport, period, null, { companyIds: [1], analyticAccountIds: [alpha.id] });
+  const rowOf = (out, code) => out.rows.find((r) => r.code === code);
+  assert.equal(rowOf(projectOut, 'PERIOD_EXP').values[0], 50, 'Report-period account row stays scoped to period.from..period.to');
+  assert.equal(rowOf(projectOut, 'CYE').values[0], -250, 'Current-year project earnings include the earlier 2041-01-15 offset (+60 on -310)');
+  assert.equal(rowOf(projectOut, 'PYE').values[0], -100, 'Prior-years project earnings include the 2040-12-20 offset (+30 on -130)');
+  assert.deepEqual(
+    rowOf(projectOut, 'CYE').accountRows.map((a) => [a.account.code, a.values[0]]),
+    [['400000', 60], ['600000', -310]],
+  );
+  assert.deepEqual(
+    rowOf(projectOut, 'PYE').accountRows.map((a) => [a.account.code, a.values[0]]),
+    [['400000', 30], ['600000', -130]],
+  );
+
+  // Legacy cumulative Balance Sheet reconciles cash (-350) with CYE (-250) + PYE (-100).
+  const bsReport = findStatementReport(db, 'balance', 1);
+  const legacyBsProject = configurableReportLegacy(db, bsReport, period, null, { companyIds: [1], analyticAccountIds: [alpha.id] });
+  assert.equal(rowOf(legacyBsProject, 'ASSETS').values[0], -350);
+  assert.equal(rowOf(legacyBsProject, 'CYE').values[0], -250);
+  assert.equal(rowOf(legacyBsProject, 'PYE').values[0], -100);
+  assert.equal(rowOf(legacyBsProject, 'LIAB_EQUITY').values[0], -350);
+
+  // Control with no analytic filter keeps unfiltered behavior unchanged.
+  const controlOut = configurableReport(db, customReport, period, null, { companyIds: [1] });
+  assert.equal(rowOf(controlOut, 'PERIOD_EXP').values[0], 50);
+  assert.equal(rowOf(controlOut, 'CYE').values[0], -290);
+  assert.equal(rowOf(controlOut, 'PYE').values[0], -100);
+  const legacyBsControl = configurableReportLegacy(db, bsReport, period, null, { companyIds: [1] });
+  assert.equal(rowOf(legacyBsControl, 'ASSETS').values[0], -390);
+  assert.equal(rowOf(legacyBsControl, 'LIAB_EQUITY').values[0], -390);
 });
