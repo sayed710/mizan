@@ -4349,6 +4349,7 @@ const ar = {
   'Attachments exceed the 3 MB limit': 'تتجاوز المرفقات الحد الأقصى البالغ 3 ميغابايت',
   'Invalid attachment': 'مرفق غير صالح',
   'Invalid invoice report': 'تقرير فاتورة غير صالح',
+  'Invalid mail template': 'قالب بريد غير صالح',
   'Only one generated invoice PDF attachment is allowed': 'يُسمح بمرفق PDF واحد فقط مُنشأ للفاتورة',
   'The invoice PDF cannot render some characters. Attach a PDF or remove the generated attachment.': 'يتعذر عرض بعض الأحرف في ملف PDF للفاتورة. أرفق ملف PDF أو أزل المرفق المُنشأ تلقائيًا.',
 };
