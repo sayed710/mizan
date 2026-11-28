@@ -131,6 +131,16 @@ export const cleanMessage = (m) => {
     ...(DELIVERY_STATES.has(m.delivery_state) ? { delivery_state: m.delivery_state } : {}),
     ...(typeof m.delivery_channel === 'string' && m.delivery_channel ? { delivery_channel: m.delivery_channel.slice(0, 32) } : {}),
     ...(typeof m.delivery_error === 'string' && m.delivery_error ? { delivery_error: m.delivery_error.slice(0, 1000) } : {}),
+    ...(Array.isArray(m.attachments) && m.attachments.length ? {
+      attachments: m.attachments
+        .filter((a) => isPlain(a) && typeof a.name === 'string' && a.name.trim())
+        .slice(0, 50)
+        .map((a) => ({
+          name: a.name.trim().slice(0, 200),
+          ...(typeof a.type === 'string' && a.type ? { type: a.type.slice(0, 100) } : {}),
+          ...(Number.isFinite(Number(a.size)) && Number(a.size) >= 0 ? { size: Number(a.size) } : {}),
+        })),
+    } : {}),
   };
 };
 

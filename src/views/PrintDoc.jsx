@@ -288,7 +288,7 @@ function printCell(db, model, k, f, l, rec) {
   return display(db, f, value, { ...l, company_id: l.company_id ?? rec.company_id, currency_id: l.currency_id ?? rec.currency_id });
 }
 
-function DocumentPaper({ db, model, def, layout, rec, proforma = false }) {
+function DocumentPaper({ db, model, def, layout, rec, proforma = false, report = null }) {
   const company = documentCompany(db, rec);
   const qrSettings = invoiceQrSettingsForCompany(db, company);
   const isProformaInvoice = model === 'account.move' && isProformaMove(rec, proforma);
@@ -378,7 +378,7 @@ function DocumentPaper({ db, model, def, layout, rec, proforma = false }) {
           );
         })()}
       </dl>
-      {model === 'account.move' && <PaymentQr db={db} company={company} settings={qrSettings} move={rec} />}
+      {model === 'account.move' && !['without_payment', 'invoices_without_payment'].includes(report) && <PaymentQr db={db} company={company} settings={qrSettings} move={rec} />}
       {model === 'account.move' && (() => {
         const term = rec.invoice_payment_term_id && read(db, 'account.payment.term', rec.invoice_payment_term_id);
         const note = invoiceTermNote(db, rec) && <p className="paper-note">{invoiceTermNote(db, rec)}</p>;
@@ -614,7 +614,7 @@ export function PrintDoc({ model, id, proforma = false, report = null, preview =
         <button type="button" className="btn" onClick={() => history.back()}>{t('Back')}</button>
       </div>
       {docs.map((doc) => (
-        <DocumentPaper key={doc.id} db={db} model={model} def={def} layout={layout} rec={doc} proforma={proforma} />
+        <DocumentPaper key={doc.id} db={db} model={model} def={def} layout={layout} rec={doc} proforma={proforma} report={report} />
       ))}
     </main>
   );

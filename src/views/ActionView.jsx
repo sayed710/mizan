@@ -173,7 +173,8 @@ export function ActionView({ leaf, base, params }) {
           for (const id of emailIds) {
             const recName = read(getDb(), model, id)?.name || `#${id}`;
             try {
-              const out = await serverAction(endpoint, { model, id });
+              const emailPayload = res?.emailPayloads?.[id];
+              const out = await serverAction(endpoint, { model, id, ...(emailPayload ? { send: emailPayload } : {}) });
               if (out?.ok === false) throw new Error(out.error ?? 'Could not save changes');
             } catch (e) {
               const classified = classifySendError(e);

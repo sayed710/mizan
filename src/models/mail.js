@@ -86,8 +86,15 @@ export const mailModels = {
 
   'mail.template': {
     label: 'Email Templates',
+    guard: (_db, _before, after) => {
+      if (Array.isArray(after.attachments) && after.attachments.some((a) => !a?.file || (!a.file.data && !a.file.blob))) {
+        return 'Each template attachment requires a file';
+      }
+      return null;
+    },
     fields: {
       name: { type: 'char', label: 'Name', required: true },
+      code: { type: 'char', label: 'Code', readonly: true, hidden: true },
       model: {
         type: 'selection',
         label: 'Applies to',
@@ -95,14 +102,28 @@ export const mailModels = {
         options: [['res.partner', 'Contact'], ['account.move', 'Invoice'], ['sale.order', 'Sales Order']],
       },
       subject: { type: 'char', label: 'Subject' },
+      subject_ar: { type: 'char', label: 'Arabic Subject', hideWhen: (r) => r?.model !== 'account.move' },
       body: { type: 'text', label: 'Body' },
+      body_ar: { type: 'text', label: 'Arabic Body', hideWhen: (r) => r?.model !== 'account.move' },
+      attachments: {
+        type: 'one2many',
+        label: 'Attachments',
+        fields: {
+          name: { type: 'char', label: 'File Name' },
+          file: { type: 'binary', label: 'File', required: true },
+        },
+        newLine: () => ({ name: '', file: null }),
+      },
     },
-    defaults: () => ({ model: 'res.partner' }),
+    defaults: () => ({ model: 'res.partner', attachments: [] }),
     list: ['name', 'model', 'subject'],
     form: {
       title: 'name',
-      groups: [['model', 'subject']],
-      tabs: [{ label: 'Content', fields: ['body'] }],
+      groups: [['model', 'subject', 'subject_ar']],
+      tabs: [
+        { label: 'Content', fields: ['body', 'body_ar'] },
+        { label: 'Attachments', fields: ['attachments'] },
+      ],
     },
   },
 };

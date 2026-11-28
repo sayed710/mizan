@@ -18,6 +18,7 @@ import { migrateTimeOff } from './models/timeoff.js';
 import { ensureCalendars } from './models/calendar.js';
 import { migrateProductCategories } from './models/productconfig.js';
 import { defaultTaxRepartitionLines } from './models/taxes.js';
+import { ensureInvoiceMailTemplates } from './models/invoiceSend.js';
 
 const partners = [
   { name: 'Nile Furniture Co.', is_company: true, email: 'sales@nilefurniture.example', phone: '+20 2 2345 6789', city: 'Cairo', country: 'Egypt', tag_ids: ['VIP'], customer_rank: 1 },
@@ -600,6 +601,7 @@ export function seed() {
   add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hi, can you confirm the delivery date of our chairs?', direction: 'incoming', state: 'received', wa_message_id: 'seed-in-1', res_model: 'res.partner', res_id: 1, date: hourAgo(2) });
   add('whatsapp.message', { partner_id: 1, phone: waPhone, body: 'Hello! Your chairs ship on Thursday.', direction: 'outgoing', state: 'read', wa_message_id: 'seed-out-1', res_model: 'res.partner', res_id: 1, date: hourAgo(1) });
 
+  db = ensureInvoiceMailTemplates(db);
   const seeded = { ...db, messages: [] };
   // Seeded quantities are opening stock: value them and post them against equity so stock reports match the ledger.
   const opened = postOpeningStock(seeded, today().slice(0, 4) + '-01-01');
