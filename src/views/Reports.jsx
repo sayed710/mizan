@@ -1166,15 +1166,15 @@ const VALUATION_COMPARISON_REASONS = {
 /** Stock value per product from its valuation layers (revaluations and landed costs included), largest first. */
 function Valuation({ db, period, companyId, categoryId, productId, warehouseId, locationId, money: moneyProp }) {
   const fmtMoney = moneyProp ?? reportMoney(db, companyId);
-  const at = period.to || today();
   const report = valuationReport(db, {
-    at,
+    at: period.to || today(),
     companyId,
     categoryId,
     productId,
     warehouseId,
     locationId,
   });
+  const at = period.to || today();
   const unavailable = Object.values(report).some((v) => v.qty === null);
   const rows = Object.entries(report).filter(([, v]) => v.qty === null || Math.abs(v.qty) > 1e-8 || Math.abs(Number(v.value) || 0) > 1e-8)
     .map(([id, v]) => ({ p: { ...read(db, 'product', Number(id)), qty_available: v.qty, cost: v.unitCost }, value: v.value })).sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
