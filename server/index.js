@@ -845,7 +845,17 @@ async function api(req, res, path) {
   }
   if ((path === '/api/mail/document' || path === '/api/mail/mailing' || path === '/api/mail/followup' || path === '/api/mail/statement') && req.method === 'POST') {
     if (!SMTP) return send(res, 400, { error: 'Email is not configured (MIZAN_SMTP_HOST / MIZAN_SMTP_FROM)' });
-    const body = await readJson(req);
+    if (Number(req.headers['content-length']) > MAX_BODY) {
+      req.resume();
+      return send(res, 413, { error: 'Request too large' });
+    }
+    let body;
+    try {
+      body = await readJson(req);
+    } catch (e) {
+      return send(res, e.message === 'Request too large' ? 413 : 400, { error: e.message });
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return send(res, 400, { error: 'Invalid JSON' });
     const model = path.endsWith('mailing') ? 'mailing.mailing' : (path.endsWith('followup') || path.endsWith('statement')) ? 'res.partner' : String(body.model ?? '');
     if ((path.endsWith('followup') || path.endsWith('statement')) && allowedFor(user) && !allowedFor(user).has('account.move')) return send(res, 403, { error: 'No access to account.move' });
     const allowed = allowedFor(user);
@@ -861,7 +871,7 @@ async function api(req, res, path) {
           ? await sendCustomerStatement(SMTP, snapshot, body)
           : path.endsWith('followup')
           ? await sendFollowUp(SMTP, snapshot, user, { partnerId: body.partnerId, companyId: body.companyId, ...(body.joinInvoices !== undefined ? { joinInvoices: Boolean(body.joinInvoices) } : {}), ...(body.pendingLetter !== undefined ? { pendingLetter: Boolean(body.pendingLetter) } : {}) }, undefined, writeOptions(user, allowed))
-          : await sendDocument(SMTP, snapshot, user, body);
+          : await sendDocument(SMTP, snapshot, user, body, { blobs });
       delivered = Boolean(out.db);
       if (at !== epoch) return send(res, 409, { error: 'The email was sent, but the data was restored meanwhile, so the send was not recorded', delivered: true });
       if (!out.db) return send(res, out.status, out.body);

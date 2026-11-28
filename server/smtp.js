@@ -60,10 +60,16 @@ function replies(socket) {
 
 /**
  * Send one email: plain text, or text plus an HTML alternative, with optional MIME attachments. Resolves on 250 after DATA; rejects with the server's reply otherwise.
- * @param {{to: string, subject: string, text: string, html?: string, replyTo?: string, listUnsubscribe?: string, attachments?: Array<{filename: string, contentType?: string, content: string | Buffer}>}} msg
+ * @param {{to: string | string[], subject: string, text: string, html?: string, replyTo?: string, listUnsubscribe?: string, attachments?: Array<{filename: string, contentType?: string, content: string | Buffer}>}} msg
  */
 export async function sendMail(cfg, { to, subject, text, html, replyTo, listUnsubscribe, attachments = [] }) {
-  if (!ADDRESS.test(to)) throw new Error(`Invalid recipient ${to}`);
+  const rawRecipients = Array.isArray(to) ? to : [to];
+  const recipients = [];
+  for (const addr of rawRecipients) {
+    if (typeof addr !== 'string' || !ADDRESS.test(addr)) throw new Error(`Invalid recipient ${addr}`);
+    if (!recipients.includes(addr)) recipients.push(addr);
+  }
+  if (!recipients.length) throw new Error('Invalid recipient ');
   const timeoutMs = 20000;
   let socket = cfg.secure
     ? tls.connect({ host: cfg.host, port: cfg.port, servername: cfg.host, rejectUnauthorized: cfg.rejectUnauthorized })
@@ -94,7 +100,9 @@ export async function sendMail(cfg, { to, subject, text, html, replyTo, listUnsu
       await cmd(Buffer.from(cfg.pass ?? '').toString('base64'), [235]);
     }
     await cmd(`MAIL FROM:<${cfg.from}>`, [250]);
-    await cmd(`RCPT TO:<${to}>`, [250, 251]);
+    for (const rcpt of recipients) {
+      await cmd(`RCPT TO:<${rcpt}>`, [250, 251]);
+    }
     await cmd('DATA', [354]);
     const crlf = (v) => String(v).replace(/\r?\n/g, '\r\n').replace(/^\./gm, '..');
     const boundary = `mizan-${randomUUID()}`;
@@ -123,7 +131,7 @@ export async function sendMail(cfg, { to, subject, text, html, replyTo, listUnsu
         })()
       : bodyLines;
     const message = [
-      `From: ${header(cfg.from)}`, `To: ${header(to)}`, ...(replyTo && ADDRESS.test(replyTo) ? [`Reply-To: ${header(replyTo)}`] : []),
+      `From: ${header(cfg.from)}`, `To: ${header(recipients.join(', '))}`, ...(replyTo && ADDRESS.test(replyTo) ? [`Reply-To: ${header(replyTo)}`] : []),
       ...(/^https?:\/\/\S+$/.test(listUnsubscribe ?? '') ? [`List-Unsubscribe: <${header(listUnsubscribe)}>`, 'List-Unsubscribe-Post: List-Unsubscribe=One-Click'] : []),
       `Subject: ${encodeWord(subject)}`, `Date: ${new Date().toUTCString()}`, `Message-ID: <${randomUUID()}@mizan>`, 'MIME-Version: 1.0', ...content,
     ].join('\r\n');

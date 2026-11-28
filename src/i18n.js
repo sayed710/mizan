@@ -4331,15 +4331,40 @@ const ar = {
   'Short term cash forecast': 'توقعات النقد قصيرة الأجل',
   'Current assets to liabilities': 'نسبة الأصول المتداولة إلى الالتزامات',
   'Database is required': 'قاعدة البيانات مطلوبة',
+  'Mail Template': 'قالب البريد',
+  'Invoice report': 'تقرير الفاتورة',
+  'Invoices without Payment': 'فواتير بدون دفع',
+  'Add recipient…': 'إضافة مستلم…',
+  'Add attachment': 'إضافة مرفق',
+  'Invoice PDF': 'PDF الفاتورة',
+  'Template attachment': 'مرفق القالب',
+  'Select at least one recipient': 'اختر مستلماً واحداً على الأقل',
+  'No recipient selected.': 'لم يتم تحديد أي مستلم.',
+  'Sending Summary': 'ملخص الإرسال',
+  'No invoices selected.': 'لم يتم تحديد أي فواتير.',
+  'Arabic Subject': 'الموضوع بالعربية',
+  'Arabic Body': 'النص بالعربية',
+  'File Name': 'اسم الملف',
+  'Each template attachment requires a file': 'يتطلب كل مرفق في القالب ملفاً',
+  'Attachments exceed the 3 MB limit': 'تتجاوز المرفقات الحد الأقصى البالغ 3 ميغابايت',
+  'Invalid attachment': 'مرفق غير صالح',
+  'Invalid invoice report': 'تقرير فاتورة غير صالح',
+  'Only one generated invoice PDF attachment is allowed': 'يُسمح بمرفق PDF واحد فقط مُنشأ للفاتورة',
+  'Invoice PDF generation does not support non-Latin or Arabic characters without a Unicode PDF renderer or embedded TTF font': 'لا يدعم إنشاء ملف PDF للفاتورة الأحرف العربية أو غير اللاتينية بدون عارض PDF يدعم Unicode أو خط TTF مُضمّن',
 };
 
 /** Arabic for a label, never an inherited object member such as `constructor`. */
 const ownArabic = (label) => (Object.hasOwn(ar, label) ? ar[label] : undefined);
 
-/** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
-export function t(s, vars) {
+/** Translate an English UI string for an explicit language code (`en` or `ar`). */
+export function translate(s, langCode = lang, vars) {
   if (s == null) return '';
-  const arabic = lang === 'ar' && typeof s === 'string' ? ownArabic(s) ?? translatePattern(s, ownArabic) : null;
+  const arabic = langCode === 'ar' && typeof s === 'string' ? ownArabic(s) ?? translatePattern(s, ownArabic) : null;
   const out = arabic ?? s;
   return vars ? out.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? '') : out;
+}
+
+/** Translate an English UI string; `{name}` placeholders are filled from `vars`. */
+export function t(s, vars) {
+  return translate(s, lang, vars);
 }

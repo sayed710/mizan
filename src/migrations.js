@@ -3,6 +3,7 @@ import { bookBankMovement, statementCompanyAmount } from './models/bank.js';
 import { ensureOnlinePaymentMethods, ensurePaymentMethods, migratePaymentMethods } from './models/paymentmethod.js';
 import { ensureCountries, countryIdFor, stateIdFor } from './models/country.js';
 import { ensurePartnerIndustries } from './models/crm.js';
+import { ensureInvoiceMailTemplates } from './models/invoiceSend.js';
 // Versioned data migrations. The database records the last version applied (`schema_version`), so each migration
 // runs once per database and its result is saved like any other change. Append new steps; never edit old ones.
 import { models } from './models/index.js';
@@ -2641,6 +2642,7 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 })) } }) });
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
+MIGRATIONS.push({ version: 85, name: 'invoice-send-mail-templates', up: ensureInvoiceMailTemplates });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

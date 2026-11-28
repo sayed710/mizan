@@ -8,7 +8,10 @@ import { addressLines, documentCompany, documentTaxBreakdown } from '../src/mode
 import { subtotal, today, validDate } from '../src/models/common.js';
 import { customerStatement } from '../src/models/reports.js';
 import { followUpEmail, followUpLetter, levelChannels, logManualFollowUp, partnerFollowUp } from '../src/models/finance.js';
+import { defaultInvoiceMailTemplate, isValidEmailAddress, renderInvoiceMailTemplate } from '../src/models/invoiceSend.js';
 import { findCompanyCurrencyRecord, formatCurrency } from '../src/money.js';
+import { referencesBlob } from './blobs.js';
+import { generateInvoicePdf } from './invoicePdf.js';
 
 const DOCUMENTS = { 'sale.order': { draft: 'sent' }, 'purchase.order': { draft: 'sent' }, 'account.move': {} };
 
@@ -119,24 +122,158 @@ export function documentEmail(db, model, rec, company = null) {
   };
 }
 
+const DATA_URL_RE = /^data:([^;,]*)(?:;[^;,=]+=[^;,]*)*(;base64)?,(.*)$/s;
+const safeAttachmentFilename = (name) => String(name || 'attachment').replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 200) || 'attachment';
+export const MAX_SEND_ATTACHMENTS_BYTES = 3 * 1024 * 1024;
+const VALID_INVOICE_REPORTS = new Set(['invoices', 'invoices_without_payment', 'without_payment']);
+
+const isAccessibleTemplateBlob = (db, blobId) => (
+  (db.records?.['mail.template'] ?? []).some((tpl) => (tpl.attachments ?? []).some((att) => att?.file?.blob === blobId))
+  || referencesBlob(db, blobId)
+);
+
+function decodeDataUrlAttachment(att, db = null, blobs = null) {
+  if (!att || typeof att !== 'object') return null;
+  if (att.content != null) {
+    return {
+      filename: safeAttachmentFilename(att.filename || att.name),
+      contentType: att.contentType || att.type || 'application/octet-stream',
+      content: att.content,
+    };
+  }
+  if (typeof att.data === 'string') {
+    const match = DATA_URL_RE.exec(att.data);
+    if (!match) return null;
+    let bytes;
+    try {
+      bytes = match[2] ? Buffer.from(match[3], 'base64') : Buffer.from(decodeURIComponent(match[3]), 'utf8');
+    } catch {
+      return null;
+    }
+    return {
+      filename: safeAttachmentFilename(att.name || att.filename),
+      contentType: att.type || match[1] || 'application/octet-stream',
+      content: bytes,
+    };
+  }
+  if (typeof att.blob === 'string' && /^[0-9a-f]{32}$/.test(att.blob) && db && blobs && isAccessibleTemplateBlob(db, att.blob)) {
+    const stored = blobs.get(att.blob);
+    if (!stored) return null;
+    return {
+      filename: safeAttachmentFilename(att.name || att.filename),
+      contentType: att.type || stored.type || 'application/octet-stream',
+      content: Buffer.from(stored.data),
+    };
+  }
+  return null;
+}
+
 /**
  * @returns {Promise<{status: number, body: object, db?: object}>}
  */
-export async function sendDocument(cfg, db, _user, { model, id }) {
+export async function sendDocument(cfg, db, _user, { model, id, send = null }, { blobs = null } = {}) {
   if (!DOCUMENTS[model]) return { status: 400, body: { error: 'This document cannot be emailed' } };
   const rec = read(db, model, Number(id));
   if (!rec) return { status: 404, body: { error: 'Record not found' } };
   if (model === 'account.move' && rec.state !== 'posted') return { status: 400, body: { error: 'Only posted invoices can be emailed.' } };
-  const partner = read(db, 'res.partner', rec.partner_id);
-  if (!partner?.email) return { status: 400, body: { error: 'The customer has no email address' } };
   const company = documentCompany(db, rec);
   if (!company) return { status: 400, body: { error: 'Configure the document company before emailing.' } };
+
+  if (model === 'account.move' && send && typeof send === 'object') {
+    const partnerIds = Array.isArray(send.mail_partner_ids)
+      ? send.mail_partner_ids.map(Number).filter((pid) => Number.isSafeInteger(pid) && pid > 0)
+      : (rec.partner_id ? [rec.partner_id] : []);
+    if (!partnerIds.length) return { status: 400, body: { error: 'Select at least one recipient' } };
+    const recipients = [];
+    let primaryPartner = null;
+    for (const pid of partnerIds) {
+      const p = read(db, 'res.partner', pid);
+      if (!primaryPartner) primaryPartner = p;
+      const addr = String(p?.email ?? '').trim();
+      if (!p || !addr) return { status: 400, body: { error: 'The customer has no email address' } };
+      if (!isValidEmailAddress(addr)) return { status: 400, body: { error: 'Enter a valid email address' } };
+      if (!recipients.includes(addr)) recipients.push(addr);
+    }
+
+    const tpl = send.template_id ? read(db, 'mail.template', Number(send.template_id)) : defaultInvoiceMailTemplate(db, rec);
+    const langCode = send.lang || primaryPartner?.lang || 'en';
+    const fallback = tpl ? renderInvoiceMailTemplate(db, tpl, rec, langCode) : null;
+    const baseEmail = fallback?.subject || fallback?.body ? null : documentEmail(db, model, rec, company);
+    const subject = typeof send.subject === 'string' && send.subject.trim()
+      ? send.subject
+      : (fallback?.subject || baseEmail?.subject || `${company.name} — ${rec.name}`);
+    const text = typeof send.body === 'string'
+      ? send.body
+      : (fallback?.body || baseEmail?.text || '');
+    const html = `<!doctype html><html><body style="font-family:Arial,sans-serif;color:#111"><p style="white-space:pre-line">${escapeHtml(text)}</p></body></html>`;
+
+    const rawAttachments = Array.isArray(send.attachments) ? send.attachments : [];
+    if (rawAttachments.filter((att) => att?.kind === 'invoice_pdf').length > 1) {
+      return { status: 400, body: { error: 'Only one generated invoice PDF attachment is allowed' } };
+    }
+    const smtpAttachments = [];
+    let decodedAttachmentBytes = 0;
+    for (const att of rawAttachments) {
+      if (att?.kind === 'invoice_pdf') {
+        const pdfReportId = att.pdf_report_id || send.pdf_report_id || 'invoices';
+        if (!VALID_INVOICE_REPORTS.has(pdfReportId)) {
+          return { status: 400, body: { error: 'Invalid invoice report' } };
+        }
+        let pdfBytes;
+        try {
+          pdfBytes = await generateInvoicePdf(db, rec, { pdfReportId, company, lang: langCode });
+        } catch (err) {
+          return { status: 400, body: { error: err.message } };
+        }
+        const rawBase = String(att.name || rec.name || `invoice-${rec.id}`).replace(/\.html?$/i, '');
+        const filename = safeAttachmentFilename(rawBase.toLowerCase().endsWith('.pdf') ? rawBase : `${rawBase}.pdf`);
+        smtpAttachments.push({
+          filename,
+          contentType: 'application/pdf',
+          content: pdfBytes,
+        });
+      } else {
+        const decoded = decodeDataUrlAttachment(att, db, blobs);
+        if (!decoded) {
+          return { status: 400, body: { error: 'Invalid attachment' } };
+        }
+        decodedAttachmentBytes += Buffer.isBuffer(decoded.content)
+          ? decoded.content.length
+          : Buffer.byteLength(String(decoded.content ?? ''), 'utf8');
+        if (decodedAttachmentBytes > MAX_SEND_ATTACHMENTS_BYTES) {
+          return { status: 400, body: { error: 'Attachments exceed the 3 MB limit' } };
+        }
+        smtpAttachments.push(decoded);
+      }
+    }
+
+    await sendMail(cfg, {
+      to: recipients,
+      subject,
+      text,
+      html,
+      ...(smtpAttachments.length ? { attachments: smtpAttachments } : {}),
+    });
+    let next = write(db, model, rec.id, { is_move_sent: true });
+    const attMeta = smtpAttachments.map((a) => ({
+      name: a.filename,
+      type: a.contentType,
+      size: Buffer.isBuffer(a.content) ? a.content.length : Buffer.byteLength(String(a.content ?? ''), 'utf8'),
+    }));
+    const attNote = attMeta.length ? `\nAttachments: ${attMeta.map((a) => a.name).join(', ')}` : '';
+    const noteBody = `Sent by email to ${recipients.join(', ')}${subject ? ` — ${subject}` : ''}${attNote}`;
+    next = postNote(next, model, rec.id, noteBody, null, attMeta.length ? { attachments: attMeta } : null);
+    return { status: 200, body: { ok: true }, db: next };
+  }
+
+  const partner = read(db, 'res.partner', rec.partner_id);
+  if (!partner?.email) return { status: 400, body: { error: 'The customer has no email address' } };
   const email = { to: partner.email, ...documentEmail(db, model, rec, company) };
+  await sendMail(cfg, email);
   const nextState = DOCUMENTS[model][rec.state];
   let next = nextState ? write(db, model, rec.id, { state: nextState }) : db;
   if (model === 'account.move' && rec.state === 'posted') next = write(next, model, rec.id, { is_move_sent: true });
   next = postNote(next, model, rec.id, `Sent by email to ${partner.email}`);
-  await sendMail(cfg, email);
   return { status: 200, body: { ok: true }, db: next };
 }
 

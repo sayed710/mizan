@@ -690,3 +690,10 @@ html[dir='rtl'] .ribbon { transform: rotate(-45deg); }
 .empty-state { padding: 16px; margin: 0; }
 .bank-reconcile-quick-actions { display: flex; flex-flow: row wrap; gap: 8px; margin-block: 10px; }
 .list-avatar-cell { display: inline-flex; align-items: center; gap: 8px; }
+.wizard-alerts { display: flex; flex-direction: column; gap: 6px; }
+.wizard-alert-warning { background: #fef3c7; border-color: #f59e0b; color: #92400e; }
+.wizard-summary { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.wizard-summary-item { font-weight: 500; }
+.wizard-attachments { display: flex; flex-direction: column; gap: 8px; }
+.wizard-attachment-add { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.msg-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }

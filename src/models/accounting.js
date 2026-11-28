@@ -29,6 +29,23 @@ import { ASSET_DEPRECIATION_DEFAULTS, adjustAssetsForCreditNote, assetAccountGua
 import { productProperty } from './productconfig-helpers.js';
 import { currentCompany, recipientBankCompanyError } from './company.js';
 import { openActivitiesText } from './mail.js';
+import {
+  batchSendAlerts,
+  batchSendSummary,
+  defaultInvoiceMailTemplate,
+  ensureInvoiceMailTemplates,
+  invoicePdfAttachment,
+  isSalesDocument,
+  moveTemplateContext,
+  renderInvoiceMailTemplate,
+  resolveMoveSelection,
+  runSendMoves,
+  sendMovesBatchWizard,
+  sendMoveSingleWizard,
+  sendMovesWizard,
+  singleSendAlerts,
+  templateAttachments,
+} from './invoiceSend.js';
 import { onlineAccountForJournal } from './onlineSync.js';
 import { openingAmounts, setOpeningBalance } from './opening.js';
 import { DEFAULT_SEPA_PAIN_VERSION, SEPA_PAIN_VERSIONS, isValidSepaPainVersion } from './sepa.js';
@@ -50,7 +67,27 @@ import {
   unlinkJournalMethodLines,
 } from './paymentmethod.js';
 
-export { invoiceTaxAmount, isLegacyCashBasisRelease, total, applyPaymentCredit, computeEntryTaxLines, refreshDraftEntryTaxes };
+export {
+  invoiceTaxAmount,
+  isLegacyCashBasisRelease,
+  total,
+  applyPaymentCredit,
+  computeEntryTaxLines,
+  refreshDraftEntryTaxes,
+  ensureInvoiceMailTemplates,
+  defaultInvoiceMailTemplate,
+  renderInvoiceMailTemplate,
+  moveTemplateContext,
+  invoicePdfAttachment,
+  templateAttachments,
+  singleSendAlerts,
+  batchSendAlerts,
+  batchSendSummary,
+  sendMoveSingleWizard,
+  sendMovesBatchWizard,
+  sendMovesWizard,
+  runSendMoves,
+};
 
 function invoiceCompanyDefaults(db, move, previous, context = {}) {
   const company = read(db, 'res.company', move.company_id);
@@ -3024,86 +3061,6 @@ const invoiceSearchFilters = ({ purchases = false } = {}) => [
   ...(purchases ? [monthFilters('date', 'Accounting Date')] : []),
   monthFilters('invoice_date_due', 'Due Date'),
 ];
-
-const isSalesDocument = (r) => Boolean(r && ['out_invoice', 'out_refund', 'out_receipt'].includes(r.move_type));
-
-function resolveMoveSelection(db, moveOrIds) {
-  if (Array.isArray(moveOrIds)) {
-    if (!moveOrIds.length) throw new Error('Select at least one record first');
-    return moveOrIds.map((id) => {
-      const move = read(db, 'account.move', id);
-      if (!move) throw new Error('Journal entry not found');
-      return move;
-    });
-  }
-  const move = moveOrIds?.id ? (read(db, 'account.move', moveOrIds.id) ?? moveOrIds) : moveOrIds;
-  if (!move) throw new Error('Journal entry not found');
-  return [move];
-}
-
-function resolveSendMoves(db, moveOrIds) {
-  const moves = resolveMoveSelection(db, moveOrIds);
-  if (moves.some((m) => m.state !== 'posted')) {
-    throw new Error("You can't generate invoices that are not posted.");
-  }
-  if (moves.some((m) => !isSalesDocument(m))) {
-    throw new Error('You can only generate sales documents or purchase documents for self-billing.');
-  }
-  return moves;
-}
-
-function moveSendingMethod(db, move) {
-  const p = move?.partner_id ? read(db, 'res.partner', move.partner_id) : null;
-  if (!p) return null;
-  if (p.invoice_sending_method) return p.invoice_sending_method;
-  const commId = commercialPartnerId(db, p.id);
-  return commId && commId !== p.id ? (read(db, 'res.partner', commId)?.invoice_sending_method ?? null) : null;
-}
-
-function partitionSendMoves(db, moves) {
-  const emailTargets = [];
-  const manualTargets = [];
-  for (const m of moves) {
-    const method = moveSendingMethod(db, m);
-    if (method !== 'manual') emailTargets.push(m);
-    if (method !== 'email') manualTargets.push(m);
-  }
-  return { emailTargets, manualTargets };
-}
-
-function sendMovesWizard(db, moveOrIds) {
-  const moves = resolveSendMoves(db, moveOrIds);
-  const { emailTargets, manualTargets } = partitionSendMoves(db, moves);
-  const allEmailTargetsReady = emailTargets.length > 0 && emailTargets.every((m) => {
-    const p = m.partner_id ? read(db, 'res.partner', m.partner_id) : null;
-    return Boolean(p?.email?.trim?.());
-  });
-  const anyManual = manualTargets.some((m) => moveSendingMethod(db, m) === 'manual');
-  return {
-    title: 'Send',
-    fields: [
-      { name: 'email', type: 'boolean', label: 'Email', default: allEmailTargetsReady },
-      { name: 'download', type: 'boolean', label: 'Download', default: anyManual },
-    ],
-  };
-}
-
-function runSendMoves(db, moveOrIds, values = {}) {
-  const moves = resolveSendMoves(db, moveOrIds);
-  if (!values?.email && !values?.download) {
-    throw new Error('Select at least one channel: Email or Download');
-  }
-  const { emailTargets, manualTargets } = partitionSendMoves(db, moves);
-  const emailMoves = values.email ? emailTargets : [];
-  const downloadMovesList = values.download ? manualTargets : [];
-  const emailSet = new Set(emailMoves.map((m) => m.id));
-  const toMarkSent = values.live ? downloadMovesList.filter((m) => !emailSet.has(m.id)) : downloadMovesList;
-  return {
-    db: toMarkSent.reduce((acc, m) => write(acc, 'account.move', m.id, { is_move_sent: true }), db),
-    emailIds: emailMoves.map((m) => m.id),
-    ...(downloadMovesList.length ? { go: `#/print/account.move/${downloadMovesList.map((m) => m.id).join(',')}` } : {}),
-  };
-}
 
 function downloadMoves(db, moveOrIds) {
   const moves = resolveMoveSelection(db, moveOrIds);

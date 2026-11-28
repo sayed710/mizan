@@ -233,6 +233,11 @@ const patterns = {
   "You can't delete a payment method that is linked to a provider in the enabled or test state.\nLinked provider(s): {1}": 'لا يمكنك حذف طريقة دفع مرتبطة بمزود في حالة مُفعّل أو اختبار.\nالمزودون المرتبطون: {1}',
   "You can't link a provider in the enabled or test state to an archived payment method.\nLinked provider(s): {1}": 'لا يمكنك ربط مزود في حالة مُفعّل أو اختبار بطريقة دفع مؤرشفة.\nالمزودون المرتبطون: {1}',
   "You can't enable a payment provider that is linked to an archived payment method.\nArchived method(s): {1}": 'لا يمكنك تفعيل مزود دفع مرتبط بطريقة دفع مؤرشفة.\nطرق الدفع المؤرشفة: {1}',
+  'Partner {1} has no email address.': 'الشريك {1} ليس لديه عنوان بريد إلكتروني.',
+  'Partner {1} has an invalid email address.': 'الشريك {1} لديه عنوان بريد إلكتروني غير صالح.',
+  '{1} invoice(s) cannot be emailed because the partner has no email address: {2}.': 'لا يمكن إرسال {1} فاتورة بالبريد الإلكتروني لعدم وجود بريد إلكتروني للشريك: {2}.',
+  '{1} invoice(s) have a partner with an invalid email address: {2}.': '{1} فاتورة لشريك لديه عنوان بريد إلكتروني غير صالح: {2}.',
+  '{1}: {2} invoice(s)': '{1*}: {2} فاتورة',
 };
 
 // Short English words and phrases that the code puts inside the messages above.

@@ -399,6 +399,11 @@ function Chatter({ db, model, id, name }) {
             <div>
               <div className="msg-meta"><b>{m.author}</b> <time dateTime={m.date}>{new Date(m.date).toLocaleString(dateLocale)}</time></div>
               <div className="msg-body">{m.body}</div>
+              {Array.isArray(m.attachments) && m.attachments.length > 0 && (
+                <div className="msg-attachments">
+                  {m.attachments.map((att, idx) => <span key={`${att.name}-${idx}`} className="tag">{att.name}</span>)}
+                </div>
+              )}
             </div>
           </li>
         ))}
@@ -643,7 +648,8 @@ export function FormView({ leaf, id, base, params }) {
       if (shouldEmail && (!res?.emailIds || res.emailIds.includes(savedId))) {
         if (live) {
           try {
-            const out = await serverAction(endpoint, { model, id: savedId });
+            const emailPayload = res?.emailPayloads?.[savedId];
+            const out = await serverAction(endpoint, { model, id: savedId, ...(emailPayload ? { send: emailPayload } : {}) });
             if (out?.ok === false) throw new Error(out.error ?? t('Could not save changes'));
             setWizard(null);
             setError(null);
