@@ -8,6 +8,7 @@ import { addDays, today } from './models/common.js';
 import { generateVariants, moveStock } from './models/sales.js';
 import { CHART, JOURNALS, STOCK_CHART_ROLES, accountId, isLiquidityJournal, postEntry } from './models/ledger.js';
 import { defaultCashFlowActivity } from './models/reports.js';
+import { ensureIndirectCashFlowTags, indirectTagIdsByName } from './models/cashFlowIndirect.js';
 import { INCOTERMS_2020, payMove, postMove } from './models/accounting.js';
 import { moveValued, postOpeningStock } from './models/valuation.js';
 import { ensurePartnerIndustries } from './models/crm.js';
@@ -116,16 +117,40 @@ export function seed() {
     investing: add('account.account.tag', { name: 'Investing Activities', cash_flow_activity: 'investing' }),
     financing: add('account.account.tag', { name: 'Financing Activities', cash_flow_activity: 'financing' }),
   };
+  db = ensureIndirectCashFlowTags(db);
+  const indirectTagsByName = indirectTagIdsByName(db);
+  const indirectChartTags = {
+    '680000': ['Adjustment - Depreciation and amortization'],
+    '450300': ['Adjustment - PPE Sale'],
+    '690300': ['Adjustment - PPE Sale'],
+    '690400': ['Adjustment - Net Financial Result', 'Operating - Interest Paid'],
+    '121000': ['Working Capital - Trade Receivable'],
+    '132000': ['Working Capital - Other Receivable'],
+    '131100': ['Working Capital - Other Receivable'],
+    '211000': ['Working Capital - Trade Payable'],
+    '230000': ['Working Capital - Other Payable'],
+    '230100': ['Working Capital - Other Payable'],
+    '240000': ['Working Capital - Other Payable'],
+    '250100': ['Working Capital - Other Payable'],
+    '251100': ['Working Capital - Other Payable'],
+    '110200': ['Working Capital - Other Payable'],
+    '110100': ['Working Capital - Inventory'],
+    '212000': ['Working Capital - Deferred Revenue'],
+    '151000': ['Investment - PPE Purchase'],
+    '301000': ['Financing - Share Issuance'],
+    '260000': ['Financing - Borrowings Short Term'],
+  };
   // The demo chart tags loans payable as financing explicitly; every other account follows its type.
   const chartActivity = { '260000': 'financing' };
   const installedAccountIds = {};
   const installedByCode = {};
   CHART.forEach(([code, name, account_type, key]) => {
+    const indirectIds = (indirectChartTags[code] ?? []).flatMap((tagName) => indirectTagsByName.get(tagName) ?? []);
     const id = add('account.account', {
       code, name, account_type,
       ...(account_type === 'asset_fixed' ? { create_asset: 'draft' } : {}),
       reconcile: ['asset_receivable', 'liability_payable'].includes(account_type),
-      tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)]],
+      tag_ids: [cashFlowTags[chartActivity[code] ?? defaultCashFlowActivity(account_type)], ...indirectIds],
     });
     installedByCode[code] = id;
     if (key) installedAccountIds[key] = id;

@@ -8,6 +8,7 @@ import {
   balances,
   filterByAnalytic,
   fiscalYearStart,
+  isIncomeOrExpenseAccount,
   journalItems,
   profitAndLoss,
   weighted,
@@ -300,7 +301,7 @@ function resolveReportItems(db, report, period, companies, { analyticAccountIds,
   const scoped = report.exclude_closing ? raw.filter((item) => !item.is_closing) : raw;
   if (!analyticAccountIds?.length) return scoped;
   return report.date_scope === 'cumulative'
-    ? analyticMoveItems(scoped, analyticAccountIds)
+    ? analyticMoveItems(scoped, analyticAccountIds, db)
     : filterByAnalytic(scoped, analyticAccountIds);
 }
 
@@ -317,6 +318,29 @@ function addEarningsAccounts(target, detail) {
   }
 }
 
+/** Collect weighted analytic P&L offset lines for a single fiscal earnings filter window. */
+function pnlOffsetsForFilter(db, filter, { includeClosing, weight, analyticAccountIds }) {
+  if (!analyticAccountIds?.length) return [];
+  const items = analyticMoveItems(journalItems(db, { ...filter, includeClosing }), analyticAccountIds, db);
+  return weighted(items, weight).filter(
+    (item) => item.analytic_offset && isIncomeOrExpenseAccount(read(db, 'account.account', item.account_id)),
+  );
+}
+
+/** Apply explicit P&L offset adjustments to the cumulative earnings net and account breakdown. */
+function applyEarningsOffsets(db, offsets, net, targetAccounts) {
+  for (const item of offsets) {
+    const booked = reportingBookedAmount(db, item, (Number(item.debit) || 0) - (Number(item.credit) || 0));
+    net = round(net - booked);
+    const account = read(db, 'account.account', item.account_id);
+    if (account) {
+      const entry = targetAccounts.get(account.id) ?? { account, balance: 0 };
+      targetAccounts.set(account.id, { ...entry, balance: round(entry.balance + booked) });
+    }
+  }
+  return net;
+}
+
 function computeEarningsSummary(db, report, period, weight, companies, { analyticAccountIds, reviewMode } = {}) {
   const effective = effectiveReportPeriod(report, period);
   const reportDate = effective.to || today();
@@ -326,16 +350,17 @@ function computeEarningsSummary(db, report, period, weight, companies, { analyti
   let priorYears = 0;
   const currentAccounts = new Map();
   const priorAccounts = new Map();
+  const offsetOpts = { includeClosing, weight, analyticAccountIds };
   for (const cId of companies) {
     const yearStart = fiscalYearStart(db, reportDate, cId);
     const currentFilter = { ...effective, company_id: cId, from: yearStart, to: reportDate, ...modeFilter };
     const priorFilter = { ...effective, company_id: cId, from: '', to: addDays(yearStart, -1), ...modeFilter };
     const current = profitAndLoss(db, currentFilter, { includeClosing, weight, analyticAccountIds });
     const prior = profitAndLoss(db, priorFilter, { includeClosing, weight, analyticAccountIds });
-    currentYear = round(currentYear + current.net);
-    priorYears = round(priorYears + prior.net);
     addEarningsAccounts(currentAccounts, current.detail);
     addEarningsAccounts(priorAccounts, prior.detail);
+    currentYear = applyEarningsOffsets(db, pnlOffsetsForFilter(db, currentFilter, offsetOpts), round(currentYear + current.net), currentAccounts);
+    priorYears = applyEarningsOffsets(db, pnlOffsetsForFilter(db, priorFilter, offsetOpts), round(priorYears + prior.net), priorAccounts);
   }
   return {
     current_year: currentYear,

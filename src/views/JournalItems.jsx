@@ -376,6 +376,7 @@ export function JournalItems({ leaf = {} } = {}) {
   const reportTaxSide = hashParams.get('taxSide');
   const trialOpening = hashParams.get('trialOpening');
   const cashFlowAccount = Number(hashParams.get('cashFlowAccount')) || null;
+  const cashFlowSection = hashParams.get('cashFlowSection') || null;
   const agedKind = hashParams.get('agedKind');
   const agedBucket = hashParams.get('agedBucket');
   const journalFilter = Number(hashParams.get('journal')) || null;
@@ -401,7 +402,12 @@ export function JournalItems({ leaf = {} } = {}) {
   const reportDb = reportJournalIds.length ? { ...db, unfilteredDb: db, records: { ...db.records, 'account.move': (db.records['account.move'] ?? []).filter((move) => reportJournalIds.includes(move.journal_id)) } } : db;
   const reportMode = hashParams.get('reviewMode') === 'all' ? 'all' : 'posted';
   const analyticAccountIds = (hashParams.get('analytics') ?? '').split(',').map(Number).filter((id) => Number.isSafeInteger(id) && id > 0);
-  const cashSources = cashFlowAccount ? new Set(cashFlow(reportDb, { from, to, company_id: filterCompany, analyticAccountIds, reviewMode: reportMode, includeSources: true }).lines.find((line) => line.account.id === cashFlowAccount)?.sourceMoveIds ?? []) : null;
+  const cashSources = cashFlowAccount ? new Set(
+    cashFlow(reportDb, { from, to, company_id: filterCompany, analyticAccountIds, reviewMode: reportMode, includeSources: true })
+      .lines
+      .filter((line) => line.account.id === cashFlowAccount && (!cashFlowSection || line.section === cashFlowSection))
+      .flatMap((line) => line.sourceMoveIds ?? []),
+  ) : null;
   const agingInterval = Number(hashParams.get('agingInterval')) || 30;
   const agingBasedOn = hashParams.get('agingBasedOn') ?? 'base_on_maturity_date';
   const ageRange = agedKind && agedBucket ? BUCKETS(agingInterval).find(([key]) => key === agedBucket) : null;
@@ -420,7 +426,7 @@ export function JournalItems({ leaf = {} } = {}) {
   };
   const rawItems = journalItems(db, { ...(matchingGroup ? {} : { from: cashSources ? undefined : from, to: agedCutoff ?? to }), reviewMode: !matchingGroup && moveFilter ? 'all_with_cancel' : 'all', includeDraftInvoices: Boolean(ageRange || (reportTaxId && reportMode === 'all')), ...(filterCompany ? { company_id: filterCompany } : {}) });
   const sourceItems = !matchingGroup && analyticAccountIds.length
-    ? (cashFlowAccount ? analyticMoveItems(rawItems, analyticAccountIds) : filterByAnalytic(rawItems, analyticAccountIds))
+    ? (cashFlowAccount ? analyticMoveItems(rawItems, analyticAccountIds, db) : filterByAnalytic(rawItems, analyticAccountIds))
     : rawItems;
   const trialItems = trialOpening ? sourceItems.filter((line) => line.date < trialOpening || !line.is_closing) : sourceItems;
   const preTaxItems = trialOpening ? trialOpeningItems(db, trialItems, trialOpening) : trialItems;

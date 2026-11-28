@@ -19,6 +19,7 @@ import { AUDIT_MODELS, auditTrailToCsv, collectAuditTrailRows } from '../models/
 import { PAGE_SIZE, pageWindow } from './paging.js';
 import { valuationReport } from '../models/valuation.js';
 import { CashFlow, CustomerStatement, ExecutiveSummary, FiscalReport, PartnerLedger, partnerLedgerExportRows, TrialBalance } from './FinanceReports.jsx';
+import { CashFlowIndirect } from './CashFlowIndirect.jsx';
 import { dateLocale, t } from '../i18n.js';
 import { money, PagerButtons } from '../ui.jsx';
 import { companyCurrencyRecord, findCompanyCurrencyRecord, formatCurrency } from '../money.js';
@@ -1342,6 +1343,8 @@ function ReportPage({ leaf, params }) {
     setValuationLocationId('');
   }
   const [comparison, setComparison] = useState('none');
+  const [cashflowVariant, setCashflowVariant] = useState('direct');
+  const isIndirectCashFlow = leaf.report === 'cashflow' && cashflowVariant === 'indirect';
   const [ledgerId, setLedgerId] = useState('');
   const [journalIds, setJournalIds] = useState([]);
   const [includeUnposted, setIncludeUnposted] = useState(false);
@@ -1382,12 +1385,12 @@ function ReportPage({ leaf, params }) {
   const activeInalterabilityJournalId = inalterabilityJournals.some((j) => j.id === Number(inalterabilityJournalId)) ? inalterabilityJournalId : '';
   const { ledgers, ledger, availableJournals, selectedJournalIds, targetJournalIds } = useMemo(() => {
     const allLedgers = search(companyDb, 'account.journal.group').sort((a, b) => (a.sequence ?? 10) - (b.sequence ?? 10));
-    const activeLedger = LEDGER_REPORTS.includes(leaf.report) ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
+    const activeLedger = LEDGER_REPORTS.includes(leaf.report) && !isIndirectCashFlow ? allLedgers.find((item) => item.id === Number(ledgerId)) : null;
     const journals = (activeLedger
       ? search(companyDb, 'account.journal', { includeArchived: leaf.report === 'inalterability' }).filter((j) => j.journal_group_id === activeLedger.id || (activeLedger.journal_ids ?? []).includes(j.id))
       : search(companyDb, 'account.journal', { includeArchived: leaf.report === 'inalterability' }))
       .filter((j) => selectedCompany === 'all' || !j.company_id || j.company_id === Number(selectedCompany));
-    const chosenIds = LEDGER_REPORTS.includes(leaf.report)
+    const chosenIds = LEDGER_REPORTS.includes(leaf.report) && !isIndirectCashFlow
       ? journalIds.filter((jId) => journals.some((j) => j.id === jId))
       : [];
     const targetIds = chosenIds.length
@@ -1396,7 +1399,7 @@ function ReportPage({ leaf, params }) {
         ? journals.map((j) => j.id)
         : null;
     return { ledgers: allLedgers, ledger: activeLedger, availableJournals: journals, selectedJournalIds: chosenIds, targetJournalIds: targetIds };
-  }, [companyDb, leaf.report, ledgerId, selectedCompany, journalIds]);
+  }, [companyDb, leaf.report, isIndirectCashFlow, ledgerId, selectedCompany, journalIds]);
   const selectedCompanyId = selectedCompany !== 'all' ? Number(selectedCompany) : null;
   const scopedCompanyDb = useMemo(() => (
     selectedCompanyId != null
@@ -1443,6 +1446,7 @@ function ReportPage({ leaf, params }) {
   ), [scopedCompanyDb, targetJournalIds, ledger]);
   const [customPeriod, setCustomPeriod] = useState({ from: params?.get('from') ?? today().slice(0, 4) + '-01-01', to: params?.get('to') || today() });
   const { title, Body, cols, firstCol } = REPORTS[leaf.report];
+  const reportTitle = isIndirectCashFlow ? 'Indirect Cash Flow Statement' : title;
   const countryTemplateKey = leaf.report === 'tax' ? resolveTaxReportTemplate(companyDb, selectedCompany, companies) : null;
   const countryTemplate = countryTemplateKey ? TAX_RETURN_TEMPLATES[countryTemplateKey] : null;
   const [taxVariant, setTaxVariant] = useState(null);
@@ -1475,7 +1479,7 @@ function ReportPage({ leaf, params }) {
         : reportPeriodRange(scopedCompanyDb, periodKey, { companyId: selectedCompanyId, offset: periodOffset })),
     [isAged, isValuation, isFollowUps, asOfState.date, periodKey, customPeriod, scopedCompanyDb, selectedCompanyId, periodOffset],
   );
-  const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all';
+  const comparable = COMPARABLE_REPORTS.has(leaf.report) && periodKey !== 'all' && !isIndirectCashFlow;
   const periodError = !isAged && !['inalterability', 'valuation', 'followups'].includes(leaf.report)
     ? customPeriodError(periodKey, period, { requireFrom: comparable && comparison !== 'none' })
     : null;
@@ -1605,7 +1609,7 @@ function ReportPage({ leaf, params }) {
   const showAnalyticFilter = ['pnl', 'balance', 'cashflow', 'ledger', 'partnerReceivable', 'partnerPayable', 'trial', 'fiscal', 'executive', 'budget'].includes(leaf.report);
   const primaryCompanyId = selectedCompany === 'all' ? (companyDb.settings?.current_company_id ?? 1) : Number(selectedCompany);
   // Like the statement reports, the cash flow offers the groups not limited to specific reports.
-  const horizontalGroups = leaf.report === 'cashflow'
+  const horizontalGroups = leaf.report === 'cashflow' && !isIndirectCashFlow
     ? search(companyDb, 'account.report.horizontal.group').filter((g) => (g.company_id ?? 1) === primaryCompanyId && !(g.report_ids ?? []).length)
     : [];
   const canComputePeriods = !periodError;
@@ -1622,7 +1626,7 @@ function ReportPage({ leaf, params }) {
   const partnerChoices = isPartnerLedger || isAged ? search(scopedCompanyDb, 'res.partner', { includeArchived: true }).filter((p) => !isAged || !agedPartnerIds || agedPartnerIds.has(p.id)).sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')) : [];
   const horizontalGroup = horizontalGroups.find((g) => g.id === Number(horizontalGroupId));
   const data = periodError ? null : (
-    periods && leaf.report === 'cashflow'
+    periods && leaf.report === 'cashflow' && !isIndirectCashFlow
       ? cashflowColumns(db, periods, {
         analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
       })
@@ -1630,7 +1634,7 @@ function ReportPage({ leaf, params }) {
         ? executiveColumns(db, periods, {
           analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
         })
-        : horizontalGroup && leaf.report === 'cashflow'
+        : horizontalGroup && leaf.report === 'cashflow' && !isIndirectCashFlow
           ? cashflowAnalyticColumns(db, horizontalGroup, period, {
             analyticAccountIds, ...(selectedCompany !== 'all' ? { company_id: Number(selectedCompany) } : {}), includeUnposted,
           })
@@ -1845,7 +1849,7 @@ function ReportPage({ leaf, params }) {
       return;
     }
     const name = leaf.report || 'report';
-    const sheetName = title || name;
+    const sheetName = reportTitle || name;
     const fullExport = ledgerExport();
     if (fullExport) {
       downloadXlsx(`${name}.xlsx`, fullExport.rows, { sheetName, headerRowCount: 1, columnTypes: fullExport.columnTypes });
@@ -1903,7 +1907,7 @@ function ReportPage({ leaf, params }) {
   const controls = (
     <>
       <div className="control-panel">
-        <h1 className="cp-title">{t(title)}</h1>
+        <h1 className="cp-title">{t(reportTitle)}</h1>
       {(isAged || isFollowUps) && <>
         <label>{t('As of Date')}<input aria-label={t('As of')} aria-invalid={Boolean(asOfState.error)} aria-describedby={asOfState.error ? asOfErrorId : undefined} type="date" value={asOfState.input} onChange={(e) => setAsOfState((prev) => resolveAgedAsOfDate(e.target.value, prev.date))} /></label>
         {asOfState.error && <span id={asOfErrorId} className="alert" role="alert">{t(asOfState.error)}</span>}
@@ -1986,13 +1990,13 @@ function ReportPage({ leaf, params }) {
           </label>
         </>
       )}
-      {LEDGER_REPORTS.includes(leaf.report) && <label className="inline-select">{t('Ledger')}
+      {LEDGER_REPORTS.includes(leaf.report) && !isIndirectCashFlow && <label className="inline-select">{t('Ledger')}
         <select aria-label={t('Ledger')} value={ledger ? String(ledger.id) : ''} onChange={(e) => { setLedgerId(e.target.value); setJournalIds([]); }}>
           <option value="">{t('All Ledgers')}</option>
           {ledgers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select>
       </label>}
-      {LEDGER_REPORTS.includes(leaf.report) && <label className="inline-select">{t('Journals')}
+      {LEDGER_REPORTS.includes(leaf.report) && !isIndirectCashFlow && <label className="inline-select">{t('Journals')}
         <select aria-label={t('Journals')} multiple value={selectedJournalIds.map(String)} onChange={(e) => setJournalIds(selectedOptionIds(e))}>
           {availableJournals.map((item) => <option key={item.id} value={item.id}>{item.name} ({item.code})</option>)}
         </select>
@@ -2089,6 +2093,15 @@ function ReportPage({ leaf, params }) {
             </select>
           </label>
         </>
+      )}
+      {leaf.report === 'cashflow' && (
+        <label className="inline-select">
+          {t('Variant')}
+          <select aria-label={t('Variant')} value={cashflowVariant} onChange={(e) => setCashflowVariant(e.target.value)}>
+            <option value="direct">{t('Cash Flow Statement')}</option>
+            <option value="indirect">{t('Indirect Cash Flow Statement')}</option>
+          </select>
+        </label>
       )}
       {leaf.report === 'tax' && countryTemplate && (
         <label className="inline-select">
@@ -2296,7 +2309,7 @@ function ReportPage({ leaf, params }) {
       active={isPrinting && !periodError}
       company={printCompany}
       companies={printCompanies}
-      title={t(title)}
+      title={t(reportTitle)}
       subtitle={subtitle}
       controls={controls}
       onBack={() => setIsPrinting(false)}
@@ -2349,6 +2362,14 @@ function ReportPage({ leaf, params }) {
               <AuditTrail db={db} rows={auditPagedRows} loading={isServer() && serverAuditLog === undefined} denied={isServer() && serverAuditLog === null} error={auditError} />
             ) : requestedStatementIds.length ? (
               requestedStatementIds.map((partnerId) => <CustomerStatement key={partnerId} db={db} period={effectivePeriod} companyId={selectedCompany} initialPartnerId={partnerId} fixedPartner money={fmtMoney} />)
+            ) : isIndirectCashFlow ? (
+              <CashFlowIndirect
+                db={db}
+                period={effectivePeriod}
+                companyId={selectedCompany}
+                analyticAccountIds={analyticAccountIds}
+                money={fmtMoney}
+              />
             ) : (
               <Body
                 db={leaf.report === 'valuation' ? companyDb : db}

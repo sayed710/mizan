@@ -29,6 +29,7 @@ import { deferredEntryTypeForKind, mapLegacyDeferredGenerationMethod, normalizeD
 import { formatTaxReturnName } from './models/taxreturn.js';
 import { DEFAULT_SEPA_PAIN_VERSION } from './models/sepa.js';
 import { withRepartitionUseInTaxClosing } from './models/taxes.js';
+import { ensureIndirectCashFlowTags } from './models/cashFlowIndirect.js';
 
 export function migrateStages(db) {
   const next = db;
@@ -2641,6 +2642,7 @@ MIGRATIONS.push({ version: 83, name: 'accounting-report-options', up: (db) => ({
 })) } }) });
 
 MIGRATIONS.push({ version: 84, name: 'statement-growth-directions', up: migrateStatementGrowthDirections });
+MIGRATIONS.push({ version: 85, name: 'indirect-cash-flow-account-tags', up: ensureIndirectCashFlowTags });
 
 export const SCHEMA_VERSION = MIGRATIONS.at(-1).version;
 

@@ -255,7 +255,7 @@ export function CashFlow({ db, period, companyId, analyticAccountIds, money: mon
     <>
       <tr className="rep-section"><td><button type="button" className="btn sm" aria-expanded={open.has(key)} onClick={() => setOpen((prev) => toggleReportFold(prev, key))}><span className="caret">{open.has(key) ? '▾' : '▸'}</span> {t(title)}</button></td>{num(r[key], fmtMoney)}</tr>
       {r.lines.filter((l) => l.section === key).map((l) => (
-        <tr key={`${key}-${l.account.id}`} className={open.has(key) ? "rep-detail" : "rep-detail report-folded-row"}><td><a href={`#/open/account.account/${l.account.id}`}>{l.account.code} {l.account.name}</a></td><td className="num"><a href={reportJournalItemsHref({ period: { ...period, analyticAccountIds }, companyId: currentCo, cashFlowAccount: l.account.id })}>{fmtMoney(l.amount)}</a></td></tr>
+        <tr key={`${key}-${l.account.id}`} className={open.has(key) ? "rep-detail" : "rep-detail report-folded-row"}><td><a href={`#/open/account.account/${l.account.id}`}>{l.account.code} {l.account.name}</a></td><td className="num"><a href={reportJournalItemsHref({ period: { ...period, analyticAccountIds }, companyId: currentCo, cashFlowAccount: l.account.id, cashFlowSection: l.section })}>{fmtMoney(l.amount)}</a></td></tr>
       ))}
     </>
   );
