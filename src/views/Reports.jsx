@@ -14,7 +14,8 @@ import { budgetReport, filterReportBudgets, groupBudgetReportEntries, rootPlanMa
 import { addressLines, currentCompany, documentCompany } from '../models/company.js';
 import { checkInalterability } from '../models/hash_chain.js';
 import { journalAudit } from '../models/journal_audit.js';
-import { commit, companiesOf, getDb, isServer, listAuditAll, serverAction, useDb } from '../store.js';
+import { commit, companiesOf, getDb, getUser, isServer, listAuditAll, serverAction, useDb } from '../store.js';
+import { appOpen } from '../access.js';
 import { AUDIT_MODELS, auditTrailToCsv, collectAuditTrailRows } from '../models/auditTrail.js';
 import { PAGE_SIZE, pageWindow } from './paging.js';
 import { valuationAccountingComparison, valuationReport } from '../models/valuation.js';
@@ -1201,6 +1202,17 @@ function Valuation({ db, period, companyId, categoryId, productId, warehouseId, 
   const rawStockTotal = rows.reduce((s, r) => s + (Number(r.value) || 0), 0);
   const fallbackStockTotal = unavailable ? null : (currency ? roundCurrency(rawStockTotal, currency) : round(rawStockTotal));
   const stockTotal = comparison.stockTotal ?? fallbackStockTotal;
+  const allowedCompanies = db.settings?.allowed_company_ids ?? [currentCompany(db)];
+  const canLinkEndingStock = Boolean(
+    comparison.companyId === 1
+    && currentCompany(db) === 1
+    && allowedCompanies.length === 1
+    && allowedCompanies[0] === 1
+    && at === today()
+    && !unavailable
+    && !comparison.hasSubsetFilter
+    && appOpen(db, getUser(), 'inventory'),
+  );
   return (
     <tbody>
       {rows.map(({ p, value }) => {
@@ -1229,7 +1241,7 @@ function Valuation({ db, period, companyId, categoryId, productId, warehouseId, 
       </tr>
       <tr className="rep-detail">
         <td>
-          <a href="#/inventory/stock">{t('Ending Stock')}</a>
+          {canLinkEndingStock ? <a href="#/inventory/stock">{t('Ending Stock')}</a> : t('Ending Stock')}
           {comparison.hasSubsetFilter ? <span className="muted"> ({t('Filtered')})</span> : null}
         </td>
         <td />

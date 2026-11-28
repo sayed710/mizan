@@ -6,6 +6,7 @@ import { seed } from './seed.js';
 import { today } from './models/common.js';
 import { createCompany, setCompanies } from './models/company.js';
 import { accountId, postEntry } from './models/ledger.js';
+import { setActor } from './models/authority.js';
 import { receive, valuationAccountingComparison } from './models/valuation.js';
 import { setupDom, find } from './test-support/dom.js';
 import { fromCsv } from './csv.js';
@@ -156,7 +157,7 @@ test('INVVAL-1: posted drill scoping opens booked valuation journal items with c
     assert.equal(params.get('reviewMode'), 'posted');
 
     const invStockLink = find(host, (n) => n.tagName === 'A' && props(n)?.href === '#/inventory/stock');
-    assert.ok(invStockLink, 'Ending Stock links to #/inventory/stock');
+    assert.equal(invStockLink, null, 'Ending Stock does not link to #/inventory/stock in historical/multi-company context');
 
     // Open JournalItems with the drill href and verify scoped rows and total match
     const prevHash = globalThis.location?.hash;
@@ -389,6 +390,47 @@ test('INVVAL-1: historical linked layers use recorded posting accounts and withh
   assert.equal(broken.comparable, false);
   assert.equal(broken.reason, 'unreconcilable_layer');
   assert.equal(broken.variation, null);
+
+  // Wholly future draft/missing-move layers must not hide an earlier valid snapshot
+  const futureDraftMove = create(db, 'account.move', {
+    move_type: 'entry',
+    state: 'draft',
+    company_id: 1,
+    journal_id: search(db, 'account.journal').find((j) => j.type === 'general' && (j.company_id ?? 1) === 1).id,
+    date: '2026-03-10',
+    line_ids: [{ account_id: newAcc.id, debit: 60 }, { account_id: accountId(db, '301000', 1), credit: 60 }],
+  });
+  let futureOnlyDb = create(futureDraftMove.db, 'stock.valuation.layer', {
+    product_id: prod.id,
+    company_id: 1,
+    date: '2026-03-10',
+    quantity: 3,
+    unit_cost: 20,
+    value: 60,
+    kind: 'in',
+    move_id: futureDraftMove.id,
+  }).db;
+  futureOnlyDb = create(futureOnlyDb, 'stock.valuation.layer', {
+    product_id: prod.id,
+    company_id: 1,
+    date: '2026-03-12',
+    quantity: 1,
+    unit_cost: 20,
+    value: 20,
+    kind: 'in',
+    move_id: 999999,
+  }).db;
+  const earlierValid = valuationAccountingComparison(futureOnlyDb, { at: '2026-02-28', companyId: 1 });
+  assert.equal(earlierValid.canShowPosted, true, 'Earlier valid snapshot keeps posted balance despite future draft/missing layers');
+  assert.equal(earlierValid.comparable, true, 'Earlier valid snapshot remains comparable');
+  assert.equal(earlierValid.postedBalance, 100);
+  assert.equal(earlierValid.stockTotal, 100);
+  assert.equal(earlierValid.variation, 0);
+
+  const atFutureDraft = valuationAccountingComparison(futureOnlyDb, { at: '2026-03-31', companyId: 1 });
+  assert.equal(atFutureDraft.canShowPosted, false, 'When future draft/missing layers enter cutoff, fail closed');
+  assert.equal(atFutureDraft.comparable, false);
+  assert.equal(atFutureDraft.reason, 'unreconcilable_layer');
 });
 
 test('INVVAL-1: incompatible contexts suppress numerical comparison and keep print/CSV/XLSX coherent', async () => {
@@ -599,6 +641,74 @@ test('INVVAL-1 regression: zero-quantity row with nonzero residual value display
     assert.ok(xlsxParsed.rows.some((r) => r[0] === 'Stock Variation' && r[3] === 0));
   } finally {
     spy.restore();
+    await React.act(async () => root.unmount());
+  }
+});
+
+test('INVVAL-1: Ending Stock links to #/inventory/stock only for matching current whole-company scope', async () => {
+  const { makeEl } = setupDom();
+  const React = await import('react');
+  const { createRoot } = await import('react-dom/client');
+  const store = await import('./store.js');
+  await store.initStore();
+
+  let db = cleanDbWithAccounts();
+  const cat = create(db, 'product.category', { name: 'Link Cat' });
+  const prod = create(cat.db, 'product', { name: 'Link Widget', type: 'goods', categ_id: cat.id, cost: 25, cost_method: 'fifo', valuation: 'real_time', qty_available: 0 });
+  db = receive(prod.db, prod.id, 4, 25, { date: today(), reference: 'TODAY-REC' });
+  await React.act(async () => store.commit(db));
+
+  const { Reports } = await import('./views/Reports.jsx');
+  const host = makeEl('div');
+  host.ownerDocument = globalThis.document;
+  const root = createRoot(host);
+  const stockLink = () => find(host, (n) => n.tagName === 'A' && props(n)?.href === '#/inventory/stock');
+
+  try {
+    // 1. Supported: single-company 1, current date (today), no subset filters -> linked
+    await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'valuation' } })));
+    assert.ok(stockLink(), 'Ending Stock links to #/inventory/stock for matching current whole-company context');
+
+    // 2. Subset filter active -> plain text (no link)
+    const catSelect = find(host, (n) => props(n)?.['aria-label'] === 'Product Category');
+    await React.act(async () => props(catSelect).onChange({ target: { value: String(cat.id) } }));
+    assert.equal(stockLink(), null, 'Ending Stock renders as plain text when category filter is active');
+    await React.act(async () => props(catSelect).onChange({ target: { value: '' } }));
+    assert.ok(stockLink(), 'Ending Stock link returns when subset filter is cleared');
+
+    // 3. Historical date -> plain text (no link)
+    const asOfInput = find(host, (n) => props(n)?.['aria-label'] === 'As of');
+    await React.act(async () => props(asOfInput).onChange({ target: { value: '2026-01-15' } }));
+    assert.equal(stockLink(), null, 'Ending Stock renders as plain text for historical date');
+
+    // 4. Other-company / multi-company context at today() -> plain text (no link)
+    const branch = createCompany(db, { name: 'Other Branch', currency_id: read(db, 'res.company', 1).currency_id });
+    const multiDb = setCompanies(branch.db, { current: 1, allowed: [1, branch.id] });
+    await React.act(async () => store.commit(multiDb));
+    await React.act(async () => props(asOfInput).onChange({ target: { value: today() } }));
+    assert.equal(stockLink(), null, 'Ending Stock renders as plain text in multi-company scope');
+    const companySelect = find(host, (n) => props(n)?.['aria-label'] === 'Company');
+    await React.act(async () => props(companySelect).onChange({ target: { value: String(branch.id) } }));
+    assert.equal(stockLink(), null, 'Ending Stock renders as plain text for another selected company');
+
+    // 5. Restricted accounting-only user (no Inventory app access) -> plain text for Ending Stock, ledger drill kept
+    const prevFetch = globalThis.fetch;
+    const prevInterval = globalThis.setInterval;
+    const jsonReply = (body) => ({ ok: true, status: 200, headers: { get: (h) => ({ 'content-type': 'application/json', etag: '"1"' })[h.toLowerCase()] ?? null }, json: async () => body });
+    globalThis.fetch = async (path) => jsonReply(path === '/api/session' ? { id: 2, login: 'acct', name: 'Accountant', isAdmin: false, apps: ['accounting'] } : path === '/api/db' ? db : []);
+    globalThis.setInterval = () => 0;
+    try {
+      await React.act(async () => store.initStore());
+      await React.act(async () => root.render(React.createElement(Reports, { leaf: { report: 'valuation' } })));
+      assert.equal(stockLink(), null, 'Ending Stock renders as plain text for accounting-only user without Inventory access');
+      assert.ok(find(host, (n) => n.tagName === 'A' && props(n)?.href?.startsWith('#/accounting/journal-items?')), 'Initial Balance ledger drill remains available for accounting-only user');
+    } finally {
+      globalThis.setInterval = prevInterval;
+      globalThis.fetch = prevFetch;
+      setActor(null);
+      await React.act(async () => store.initStore());
+    }
+  } finally {
     await React.act(async () => root.unmount());
   }
 });

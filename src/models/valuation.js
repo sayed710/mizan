@@ -616,14 +616,18 @@ export function valuationAccountingComparison(db, {
 
   for (const layer of db.records['stock.valuation.layer'] ?? []) {
     if ((layer.company_id ?? 1) !== comp || !layer.move_id) continue;
+    const layerInScope = !layer.date || layer.date <= at;
     const move = read(db, 'account.move', layer.move_id);
     const mDate = move ? (move.date ?? move.invoice_date) : null;
+    const moveInScope = Boolean(mDate && mDate <= at);
+    // Ignore wholly future linked layers (future layer with missing, future nonposted, or future posted move).
+    if (!layerInScope && (!move || (!moveInScope && (move.state !== 'posted' || Boolean(mDate))))) {
+      continue;
+    }
     if (!move || move.state !== 'posted' || (move.company_id ?? 1) !== comp || !mDate) {
       hasUnreconcilableLayer = true;
       continue;
     }
-    const layerInScope = layer.date <= at;
-    const moveInScope = mDate <= at;
     if (layerInScope !== moveInScope) hasTimeBasisMismatch = true;
     if (moveInScope && Math.abs(round(Number(layer.value) || 0)) > 0) {
       const resolved = resolveLayerPostingAccount(db, layer, move, comp, config.company, config.nonValuationIds);
