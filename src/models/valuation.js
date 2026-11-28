@@ -1,14 +1,14 @@
 // Stock valuation and physical inventory over warehouse-wide product quantities.
 import { create, getActiveCompany, postNote, read, search, setActiveCompany, write } from '../orm.js';
 import { nextName, subtotal, today } from './common.js';
-import { postEntry } from './ledger.js';
+import { balances, journalItems, postEntry } from './ledger.js';
 import { configuredAccount } from './configured-account.js';
 import { moveStock, salesModels } from './sales.js';
-import { allocateCents, round } from '../money.js';
-import { isPeriodicValuation, productProperty } from './productconfig-helpers.js';
+import { allocateCents, findCompanyCurrencyRecord, round, roundCurrency } from '../money.js';
+import { categoryProperty, isPeriodicValuation, productProperty } from './productconfig-helpers.js';
 import { rateAt } from './currency.js';
 import { convert, uomForLegacy } from './uom.js';
-import { stockAccount } from './stock-accounts.js';
+import { resolveStockAccount, stockAccount } from './stock-accounts.js';
 export { stockAccount } from './stock-accounts.js';
 
 const companyOf = (db) => getActiveCompany() ?? db.settings?.current_company_id ?? 1;
@@ -459,6 +459,230 @@ export function valuationReport(db, {
     }
   }
   return rows;
+}
+
+const NON_VALUATION_ROLES = ['input', 'output', 'cogs', 'price_difference', 'production'];
+const hasFilterValue = (val) => (Array.isArray(val) ? val.map(Number).filter(Boolean).length > 0 : val != null && val !== '');
+
+function resolveCompanyValuationConfig(db, comp) {
+  const company = read(db, 'res.company', comp);
+  const currentAccountIds = new Set();
+  const nonValuationIds = new Set();
+
+  const collectNonValuation = (record) => {
+    for (const role of NON_VALUATION_ROLES) {
+      const res = resolveStockAccount(db, record, role, comp);
+      if (res.account) nonValuationIds.add(res.account);
+    }
+  };
+  collectNonValuation(null);
+
+  const companyVal = resolveStockAccount(db, null, 'valuation', comp);
+  if (companyVal.account) currentAccountIds.add(companyVal.account);
+  const companyConfigBroken = Boolean(companyVal.error && company?.account_stock_valuation_id);
+
+  let configError = false;
+  for (const cat of search(db, 'product.category')) {
+    if (cat.company_id && cat.company_id !== comp) continue;
+    if (['manual_periodic', 'periodic'].includes(categoryProperty(db, cat.id, 'property_valuation', comp))) continue;
+    const target = { categ_id: cat.id };
+    collectNonValuation(target);
+    if (cat.property_stock_valuation_account_id != null && cat.property_stock_valuation_account_id !== '') {
+      const res = resolveStockAccount(db, target, 'valuation', comp);
+      if (res.error) configError = true;
+      else if (res.account) currentAccountIds.add(res.account);
+    }
+  }
+
+  for (const p of search(db, 'product')) {
+    if (p.type !== 'goods') continue;
+    if (p.company_id && p.company_id !== comp) continue;
+    if (isPeriodicValuation(db, p, comp)) continue;
+    collectNonValuation(p);
+    const res = resolveStockAccount(db, p, 'valuation', comp);
+    if (res.error) configError = true;
+    else if (res.account) currentAccountIds.add(res.account);
+  }
+
+  const hasRoleConflict = [...currentAccountIds].some((id) => nonValuationIds.has(id));
+  const invalid = companyConfigBroken || configError || hasRoleConflict || currentAccountIds.size === 0;
+  return { invalid, currentAccountIds, nonValuationIds, company };
+}
+
+function resolveLayerPostingAccount(db, layer, move, comp, company, nonValuationIds) {
+  const val = round(Number(layer.value) || 0);
+  const lines = move.line_ids ?? [];
+  const isValidAccount = (accId) => {
+    const acc = read(db, 'account.account', accId);
+    if (!acc) return false;
+    if (acc.company_id && acc.company_id !== comp) return false;
+    return !nonValuationIds.has(accId);
+  };
+
+  if (layer.opening) {
+    const candidates = [...new Set(
+      lines
+        .filter((line) => {
+          if (!line.account_id) return false;
+          if (company?.opening_equity_account_id && line.account_id === company.opening_equity_account_id) return false;
+          const acc = read(db, 'account.account', line.account_id);
+          if (!acc || ['equity', 'equity_unaffected'].includes(acc.account_type)) return false;
+          const net = round((Number(line.debit) || 0) - (Number(line.credit) || 0));
+          return val > 0 ? net > 0 : net < 0;
+        })
+        .map((line) => line.account_id),
+    )];
+    if (candidates.length === 1 && isValidAccount(candidates[0])) return { accountId: candidates[0], error: null };
+    return { accountId: null, error: 'unreconcilable_layer' };
+  }
+
+  const exactIds = [...new Set(
+    lines
+      .filter((line) => line.account_id && round((Number(line.debit) || 0) - (Number(line.credit) || 0)) === val)
+      .map((line) => line.account_id),
+  )];
+  if (exactIds.length === 1 && isValidAccount(exactIds[0])) return { accountId: exactIds[0], error: null };
+  if (exactIds.length > 1) {
+    const nonCounterpart = exactIds.filter((id) => id !== layer.counterpart && !nonValuationIds.has(id));
+    if (nonCounterpart.length === 1 && isValidAccount(nonCounterpart[0])) return { accountId: nonCounterpart[0], error: null };
+    const assetIds = nonCounterpart.filter((id) => read(db, 'account.account', id)?.account_type?.startsWith('asset_'));
+    if (assetIds.length === 1 && isValidAccount(assetIds[0])) return { accountId: assetIds[0], error: null };
+  }
+  return { accountId: null, error: 'unreconcilable_layer' };
+}
+
+/**
+ * Read-only accounting comparison for the Stock Valuation report: resolves company-scoped valuation
+ * accounts (including recorded posting accounts on historical linked layers), computes the dated posted
+ * ledger balance in company currency, and suppresses numerical Stock Variation when scopes diverge.
+ */
+export function valuationAccountingComparison(db, {
+  at = today(),
+  companyId,
+  categoryId,
+  productId,
+  warehouseId,
+  locationId,
+  report = null,
+} = {}) {
+  const comp = companyId === 'all'
+    ? 'all'
+    : (companyId != null && companyId !== '' ? Number(companyId) : companyOf(db));
+  const allowedCompanies = db.settings?.allowed_company_ids;
+  const companyAllowed = !Array.isArray(allowedCompanies) || allowedCompanies.includes(comp);
+  const companyRecord = comp !== 'all' && Number.isSafeInteger(comp) && comp > 0 && companyAllowed
+    ? read(db, 'res.company', comp)
+    : null;
+  if (!companyRecord) {
+    return {
+      companyId: null,
+      at,
+      canShowPosted: false,
+      comparable: false,
+      reason: 'multi_company',
+      hasSubsetFilter: false,
+      stockUnavailable: false,
+      hasPeriodicStock: false,
+      accountIds: [],
+      accounts: [],
+      postedBalance: null,
+      stockTotal: null,
+      variation: null,
+    };
+  }
+
+  const stockReport = report ?? valuationReport(db, { at, companyId: comp, categoryId, productId, warehouseId, locationId });
+  const stockUnavailable = Object.values(stockReport).some((v) => v.qty === null);
+  const currency = findCompanyCurrencyRecord(db, comp);
+  const stockTotal = stockUnavailable
+    ? null
+    : roundCurrency(Object.values(stockReport).reduce((sum, v) => sum + (Number(v.value) || 0), 0), currency);
+  const hasSubsetFilter = Boolean(
+    hasFilterValue(categoryId)
+    || hasFilterValue(productId)
+    || (warehouseId != null && warehouseId !== '')
+    || (locationId != null && locationId !== ''),
+  );
+  const hasPeriodicStock = Object.entries(stockReport).some(([id, v]) => {
+    if (v.qty !== null && Math.abs(v.qty) <= 1e-8 && Math.abs(Number(v.value) || 0) <= 1e-8) return false;
+    const prod = read(db, 'product', Number(id));
+    return Boolean(prod && isPeriodicValuation(db, prod, comp));
+  });
+
+  const config = resolveCompanyValuationConfig(db, comp);
+  const accountIdSet = new Set(config.currentAccountIds);
+  let hasUnreconcilableLayer = false;
+  let hasTimeBasisMismatch = false;
+
+  for (const layer of db.records['stock.valuation.layer'] ?? []) {
+    if ((layer.company_id ?? 1) !== comp || !layer.move_id) continue;
+    const move = read(db, 'account.move', layer.move_id);
+    const mDate = move ? (move.date ?? move.invoice_date) : null;
+    if (!move || move.state !== 'posted' || (move.company_id ?? 1) !== comp || !mDate) {
+      hasUnreconcilableLayer = true;
+      continue;
+    }
+    const layerInScope = layer.date <= at;
+    const moveInScope = mDate <= at;
+    if (layerInScope !== moveInScope) hasTimeBasisMismatch = true;
+    if (moveInScope && Math.abs(round(Number(layer.value) || 0)) > 0) {
+      const resolved = resolveLayerPostingAccount(db, layer, move, comp, config.company, config.nonValuationIds);
+      if (resolved.error || !resolved.accountId) hasUnreconcilableLayer = true;
+      else accountIdSet.add(resolved.accountId);
+    }
+  }
+
+  const canShowPosted = !config.invalid && !hasUnreconcilableLayer && accountIdSet.size > 0;
+  let postedBalance = null;
+  if (canShowPosted) {
+    const scopedDb = (db.settings?.current_company_id ?? 1) === comp
+      ? db
+      : { ...db, settings: { ...db.settings, current_company_id: comp } };
+    const items = journalItems(scopedDb, { to: at, company_id: comp, reviewMode: 'posted' })
+      .filter((line) => accountIdSet.has(line.account_id));
+    const balanceMap = new Map(balances(scopedDb, items).map((b) => [b.account.id, b.balance]));
+    postedBalance = roundCurrency(
+      [...accountIdSet].reduce((sum, id) => sum + (balanceMap.get(id) ?? 0), 0),
+      currency,
+    );
+  }
+
+  let reason = null;
+  if (!canShowPosted) {
+    reason = hasUnreconcilableLayer ? 'unreconcilable_layer' : 'unconfigured_accounts';
+  } else if (hasSubsetFilter) {
+    reason = 'filtered_scope';
+  } else if (stockUnavailable) {
+    reason = 'historical_unavailable';
+  } else if (hasPeriodicStock) {
+    reason = 'periodic_stock';
+  } else if (hasTimeBasisMismatch) {
+    reason = 'time_basis_mismatch';
+  }
+
+  const comparable = canShowPosted && !reason;
+  const variation = comparable ? roundCurrency(stockTotal - postedBalance, currency) : null;
+  const accountIds = canShowPosted ? [...accountIdSet].sort((a, b) => a - b) : [];
+  const accounts = accountIds
+    .map((id) => read(db, 'account.account', id))
+    .filter(Boolean)
+    .sort((a, b) => String(a.code ?? '').localeCompare(String(b.code ?? '')) || a.id - b.id);
+
+  return {
+    companyId: comp,
+    at,
+    canShowPosted,
+    comparable,
+    reason,
+    hasSubsetFilter,
+    stockUnavailable,
+    hasPeriodicStock,
+    accountIds,
+    accounts,
+    postedBalance,
+    stockTotal,
+    variation,
+  };
 }
 
 /** Snapshot selected goods for a physical inventory, defaulting counted quantities to theoretical. */

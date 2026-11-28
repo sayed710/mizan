@@ -10,6 +10,7 @@ import { models } from './models/index.js';
 import { importStatement, importStatementLines, parseCamtBalances } from './models/statements.js';
 import { bookToAccount, reconcileWith, unreconcile } from './models/bank.js';
 import { closeStatement, roundStatementAmount } from './models/bankstatement.js';
+import { upsertCurrencyRate } from './models/currency.js';
 import { cashMove, postMove, putMoneyIn, takeMoneyOut } from './models/accounting.js';
 import { applyDiff, diffDb } from './sync.js';
 import { t } from './i18n.js';
@@ -1114,13 +1115,14 @@ test('Finding 12: linesByStatement groups lines without quadratic scans', () => 
 
 test('Finding 13: Closing foreign-currency cash statement books difference properly', () => {
   let db = seed();
-  // Ensure EUR currency exists
+  // Ensure EUR currency and an applicable rate on or before the statement date exist
   let eur = search(db, 'res.currency').find((c) => c.name === 'EUR');
   if (!eur) {
     const res = create(db, 'res.currency', { name: 'EUR', symbol: '€', rounding: 0.01 });
     db = res.db;
     eur = read(db, 'res.currency', res.id);
   }
+  db = upsertCurrencyRate(db, eur.id, { date: '2026-09-28', rate: 0.92 });
 
   const baseCash = search(db, 'account.journal').find((j) => j.type === 'cash');
   const profitAccount = search(db, 'account.account').find((a) => a.code === '450000');
